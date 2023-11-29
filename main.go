@@ -110,16 +110,17 @@ func preValidateEventLog(events []attest.Event, verbose bool) error {
 		// your own eyes :
 		// https://github.com/tianocore/edk2/blob/68d506e0d15c0c412142be68ed006c65b641560f/SecurityPkg/Tcg/Tcg2Pei/Tcg2Pei.c#L460
 		// if we base our check on the event type, it will be easy to bypass the
-		// validation by changing the event type. for example if we check
-		// debugger present like this :
+		// validation by changing the event type. For example if we check
+		// debugger presence like this :
 		// if et == "EV_EFI_ACTION" && string(event.Data) == "UEFI Debug Mode" {
 		// 		return fmt.Errorf("error UEFI debugger present")
 		// }
 		// an attacker can change the event type to EV_WHATEVER and skip the
 		// check. The only way to trust the event type is to obtain a Reference
 		// Integrity Manifest (RIM) form manufacturer, and check the digest of
-		// the event type against the RIM. soooo lets just check for the data,
+		// the event type against the RIM. so lets just check the data,
 		// regardless of the event type.
+		et := event.Type.String()
 
 		// If the DMA protection is disabled or configured to a lower security
 		// state, then the platform shall measure the "DMA Protection Disabled"
@@ -134,11 +135,23 @@ func preValidateEventLog(events []attest.Event, verbose bool) error {
 			return fmt.Errorf("error UEFI debugger present")
 		}
 
-		// EV_SEPARATOR is used to draw a line between the pre-boot environment
-		// and entering a post-boot environment. This occurs only once in the flow.
-		if event.Type.String() == "EV_SEPARATOR" {
+		// This is a sanity check, EV_SEPARATOR is used to draw a line between
+		// the pre-boot environment and entering a post-boot environment.
+		// The data within the event field of the EV_SEPARATOR event MUST be a
+		//32-bit (double-word) of 0’s. We can use this value as a RIM, so we
+		// can actually validate the event data to trust the event type.
+		if et == "EV_SEPARATOR" {
+			// EV_SEPARATOR occurs only once in the flow.
 			if Pcr7SeperatorSeen {
 				return fmt.Errorf("error duplicate of EV_SEPARATOR for PCR[7]")
+			}
+
+			if len(event.Data) != 4 {
+				return fmt.Errorf("error EV_SEPARATOR data length is not 4")
+			}
+
+			if string(event.Data) != "\x00\x00\x00\x00" {
+				return fmt.Errorf("error EV_SEPARATOR data is not 0x00000000")
 			}
 
 			// content must match the digest
@@ -156,8 +169,7 @@ func preValidateEventLog(events []attest.Event, verbose bool) error {
 		}
 	}
 
-	// we should see one : "The system SHALL measure the EV_SEPARATOR event in
-	// PCR[7]".
+	// we should definitly see one.
 	if !Pcr7SeperatorSeen {
 		return fmt.Errorf("error no EV_SEPARATOR seen for PCR[7]")
 	}
