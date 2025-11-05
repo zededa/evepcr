@@ -1,0 +1,117 @@
+diff --git a/attest/eventlog.go b/attest/eventlog.go
+index f83560c..4e5903a 100644
+--- a/attest/eventlog.go
++++ b/attest/eventlog.go
+@@ -190,9 +190,10 @@ func (e *EventLog) Events(hash HashAlg) []Event {
+ 	var events []Event
+ 	for _, re := range e.rawEvents {
+ 		ev := Event{
+-			Index: re.index,
+-			Type:  re.typ,
+-			Data:  re.data,
++			Index:    re.index,
++			Type:     re.typ,
++			Data:     re.data,
++			sequence: re.sequence,
+ 		}
+ 
+ 		for _, digest := range re.digests {
+@@ -207,6 +208,42 @@ func (e *EventLog) Events(hash HashAlg) []Event {
+ 	return events
+ }
+ 
++func (e *EventLog) OverrideEvents(index int, el *EventLog) error {
++	if index < 0 || index >= len(e.rawEvents) || index >= len(el.rawEvents) {
++		return fmt.Errorf("index %d out of bounds", index)
++	}
++
++	// override the events at the specified index with the events from el
++	e.rawEvents = e.rawEvents[:index]
++	e.rawEvents = append(e.rawEvents, el.rawEvents[index:]...)
++	return nil
++}
++
++func (e *EventLog) ReplaceEvent(index int, el *EventLog) error {
++	if index < 0 || index >= len(e.rawEvents) || index >= len(el.rawEvents) {
++		return fmt.Errorf("index %d out of bounds", index)
++	}
++
++	e.rawEvents[index] = rawEvent{
++		sequence: el.rawEvents[index].sequence,
++		index:    el.rawEvents[index].index,
++		typ:      el.rawEvents[index].typ,
++		data:     el.rawEvents[index].data,
++		digests:  el.rawEvents[index].digests,
++	}
++
++	return nil
++}
++
++func (e *EventLog) Predict(pcr PCR) ([]byte, error) {
++	predict, err := extendEvents(e.rawEvents, pcr)
++	if err != nil {
++		return nil, fmt.Errorf("failed to predict PCR %d: %w", pcr.Index, err)
++	}
++
++	return predict, nil
++}
++
+ // Verify replays the event log against a TPM's PCR values, returning the
+ // events which could be matched to a provided PCR value.
+ //
+@@ -349,11 +386,7 @@ func extend(pcr PCR, replay []byte, e rawEvent, locality byte) (pcrDigest []byte
+ 	return nil, nil, fmt.Errorf("no event digest matches pcr algorithm: %v", pcr.DigestAlg)
+ }
+ 
+-// replayPCR replays the event log for a specific PCR, using pcr and
+-// event digests with the algorithm in pcr. An error is returned if the
+-// replayed values do not match the final PCR digest, or any event tagged
+-// with that PCR does not possess an event digest with the specified algorithm.
+-func replayPCR(rawEvents []rawEvent, pcr PCR) ([]Event, bool) {
++func extendPCREvents(rawEvents []rawEvent, pcr PCR) ([]Event, []byte, error) {
+ 	var (
+ 		replay    []byte
+ 		outEvents []Event
+@@ -377,12 +410,25 @@ func replayPCR(rawEvents []rawEvent, pcr PCR) ([]Event, bool) {
+ 		}
+ 		replayValue, digest, err := extend(pcr, replay, e, locality)
+ 		if err != nil {
+-			return nil, false
++			return nil, nil, fmt.Errorf("failed to extend PCR %d with event %d: %w", pcr.Index, e.sequence, err)
+ 		}
+ 		replay = replayValue
+ 		outEvents = append(outEvents, Event{sequence: e.sequence, Data: e.data, Digest: digest, Index: pcr.Index, Type: e.typ})
+ 	}
+ 
++	return outEvents, replay, nil
++}
++
++// replayPCR replays the event log for a specific PCR, using pcr and
++// event digests with the algorithm in pcr. An error is returned if the
++// replayed values do not match the final PCR digest, or any event tagged
++// with that PCR does not possess an event digest with the specified algorithm.
++func replayPCR(rawEvents []rawEvent, pcr PCR) ([]Event, bool) {
++	outEvents, replay, err := extendPCREvents(rawEvents, pcr)
++	if err != nil {
++		return nil, false
++	}
++
+ 	if len(outEvents) > 0 && !bytes.Equal(replay, pcr.Digest) {
+ 		return nil, false
+ 	}
+@@ -394,6 +440,15 @@ type pcrReplayResult struct {
+ 	successful bool
+ }
+ 
++func extendEvents(rawEvents []rawEvent, pcr PCR) ([]byte, error) {
++	_, replay, err := extendPCREvents(rawEvents, pcr)
++	if err != nil {
++		return nil, fmt.Errorf("failed to extend PCR %d: %w", pcr.Index, err)
++	}
++
++	return replay, nil
++}
++
+ func replayEvents(rawEvents []rawEvent, pcrs []PCR) ([]Event, error) {
+ 	var (
+ 		invalidReplays []int
