@@ -1,4 +1,7 @@
 #!/bin/bash
+#
+# Copyright (c) 2026 Zededa, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 # Generate random SSH key
 ssh-keygen -t ed25519 -f /tmp/eve_key -N "" -q
