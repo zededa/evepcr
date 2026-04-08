@@ -1,4 +1,4 @@
-module eve_pcr_prediction
+module github.com/zededa/evepcr
 
 go 1.22
 
