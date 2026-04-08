@@ -1,61 +1,25 @@
-package eve_pcr_prediction
+package evepcr
 
 import (
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
 
-	"github.com/google/go-attestation/attest"
+	"eve_pcr_prediction/internal/attest"
 )
-
-func findEveGrubStageOne(eventlog *attest.EventLog) (int, error) {
-	for i, event := range eventlog.Events(attest.HashSHA256) {
-		if event.Type.String() == "EV_EFI_BOOT_SERVICES_APPLICATION" {
-			if i+1 < len(eventlog.Events(DefaultAlgo)) {
-				nextEvent := eventlog.Events(attest.HashSHA256)[i+1]
-				if nextEvent.Type.String() == "EV_IPL" && bytes.Contains(nextEvent.Data, []byte("gptprio.next")) {
-					return i, nil
-				}
-			}
-		}
-	}
-	return -1, fmt.Errorf("EVE GRUB Stage 1 event not found")
-}
-
-// we need to fix grub stage one to find EV_EFI_BOOT_SERVICES_APPLICATION event
-// if event after it is a EV_IPL with "gptprio.next" in its data, we need
-// to replace the EV_EFI_BOOT_SERVICES_APPLICATION event in the new event log
-// with the one from old event log.
-func fixEveGrubStageOne(originalOld *attest.EventLog, old *attest.EventLog, new *attest.EventLog) error {
-	// get the stage one data from original event log
-	oldStageOneIndex, err := findEveGrubStageOne(originalOld)
-	if err != nil {
-		return fmt.Errorf("error finding EVE GRUB Stage 1 event: %v", err)
-	}
-	oldData, oldDigest, err := originalOld.GetEventData(oldStageOneIndex)
-	if err != nil {
-		return fmt.Errorf("error getting old EVE GRUB Stage 1 event data: %v", err)
-	}
-	// replace the data so the prediction will match the what is expected
-	err = old.SetEventData(oldStageOneIndex, oldData, oldDigest)
-	if err != nil {
-		return fmt.Errorf("error setting old EVE GRUB Stage 1 event data: %v", err)
-	}
-
-	return nil
-}
 
 func TestPcrFive(t *testing.T) {
 	// PCR 5 can vary based on the hard disk configuration, but it also shouldn't change
-	// much except attribues of IMAGA/IMGB partition.
-	oldTable, err := GetGptPartitionTable("testdata/src_version/14.5.1bcbf.bin", nil, nil, nil, false)
+	// much except attributes of IMAGA/IMGB partition.
+	oldTable, err := GetGptPartitionTableFromFile("testdata/src_version/14.5.1bcbf.bin", nil, nil, nil, false)
 	if err != nil {
 		t.Errorf("GetPartitionTable failed: %v", err)
 	}
 
-	newTable, err := GetGptPartitionTable("testdata/dst_version/14.5_stable.bin", nil, nil, nil, false)
+	newTable, err := GetGptPartitionTableFromFile("testdata/dst_version/14.5_stable.bin", nil, nil, nil, false)
 	if err != nil {
 		t.Errorf("GetPartitionTable failed: %v", err)
 	}
@@ -94,9 +58,9 @@ func TestPcrFive(t *testing.T) {
 			t.Errorf("Partition %d ending LBA mismatch: old %d, new %d", i,
 				oldEntry.EndingLBA, newEntry.EndingLBA)
 		}
-		// We skip the Attribute check for IMAG/IMGB, as it can vary based on partiton state
+		// We skip the Attribute check for IMAG/IMGB, as it can vary based on partition state
 		// unused, updating, active, etc.
-		if oldName != "IMAGA" && oldName != "IMGB" {
+		if oldName != "IMGA" && oldName != "IMGB" {
 			if oldEntry.Attributes != newEntry.Attributes {
 				t.Errorf("Partition %d attributes mismatch: old %d, new %d", i,
 					oldEntry.Attributes, newEntry.Attributes)
@@ -110,61 +74,145 @@ func TestPcrFive(t *testing.T) {
 }
 
 func TestPcrPredictionFull(t *testing.T) {
-	allPCrs, err := PredictAllPCRs("testdata/src_version/14.5.1bcbf.bin",
-		"testdata/dst_version/binary_bios_measurements_IMGA_active",
-		"testdata/dst_version/binary_bios_measurements_IMGA_updating",
-		"testdata/dst_version/binary_bios_measurements_IMGB_active",
-		"testdata/dst_version/binary_bios_measurements_IMGB_updating",
-		fixEveGrubStageOne, nil, nil, nil)
+	// Use a dst log that has both IMGA and IMGB so all 8 partition state
+	// variants are synthesized. binary_bios_measurements_IMGB_active fits
+	// because it was captured from a fully updated device with both partitions.
+	allPCRs, err := PredictPCRsFromFiles("testdata/src_version/14.5.1bcbf.bin",
+		"testdata/dst_version/binary_bios_measurements_IMGB_active", nil)
 	if err != nil {
-		t.Errorf("PredictAllPCRs failed: %v", err)
+		t.Fatalf("PredictPCRs failed: %v", err)
 	}
 
-	if err := SerializePcrsToFile("all_pcrs.gob", allPCrs); err != nil {
-		t.Errorf("serializePcrsToFile failed: %v", err)
+	// With IMGB present, all 8 variants are synthesized (2 IMGB-absent + 6 IMGB-present).
+	// PCR[5] (GPT table) is the only one that differs across states, so we expect
+	// 8 distinct values.
+	if len(allPCRs[5]) != 8 {
+		var vals []string
+		for _, v := range allPCRs[5] {
+			vals = append(vals, "0x"+hex.EncodeToString(v))
+		}
+		t.Errorf("expected 8 distinct PCR[5] values, got %d: %v", len(allPCRs[5]), vals)
+	}
+
+	if err := SerializePcrsToFile("all_pcrs.gob", allPCRs); err != nil {
+		t.Errorf("SerializePcrsToFile failed: %v", err)
 	}
 }
 
 func TestPcrPrediction(t *testing.T) {
-	pcrs, err := PredictPCRs("testdata/src_version/14.5.1bcbf.bin",
-		"testdata/dst_version/14.5_stable.bin",
-		fixEveGrubStageOne, nil, nil, nil)
+	// dst has only IMGA (no IMGB) → 2 variants: IMGA-active and IMGA-updating.
+	allPCRs, err := PredictPCRsFromFiles("testdata/src_version/14.5.1bcbf.bin",
+		"testdata/dst_version/14.5_stable.bin", nil)
 	if err != nil {
-		t.Errorf("PredictPCR failed: %v", err)
+		t.Fatalf("PredictPCRs failed: %v", err)
 	}
 
-	// Convert predicted PCR values to YAML format
-	predictedPcrs := &PcrYml{
-		HashAlgo: map[string]map[int]string{
-			"sha256": make(map[int]string, len(pcrs)),
-		},
-	}
-	for i, pcr := range pcrs {
-		predictedPcrs.HashAlgo["sha256"][i] = "0x" + fmt.Sprintf("%X", pcr)
-	}
-
-	// Read the expected PCR values from the YAML file
 	expectedPcrs, err := ReadPCRs("testdata/dst_version/14.5_stable.pcr.yml", false)
 	if err != nil {
-		t.Errorf("ReadPCRs failed: %v", err)
+		t.Fatalf("ReadPCRs failed: %v", err)
 	}
 
 	unsetFF := "0x" + strings.Repeat("F", 64)
 	unsetZero := "0x" + strings.Repeat("0", 64)
-	for i := range expectedPcrs.HashAlgo["sha256"] {
-		// Skip the PCR if it is unset (either 0 or FF)
-		if expectedPcrs.HashAlgo["sha256"][i] == unsetFF || expectedPcrs.HashAlgo["sha256"][i] == unsetZero {
+
+	for i, expectedHex := range expectedPcrs.HashAlgo["sha256"] {
+		if expectedHex == unsetFF || expectedHex == unsetZero {
 			continue
 		}
-		// PCR 14 is set in user-mode and is not part of TPM eventlog, so skip it for now
+		// PCR 14 is set in user-mode and is not part of the TPM event log.
 		if i == 14 {
 			continue
 		}
-		if predictedPcrs.HashAlgo["sha256"][i] != expectedPcrs.HashAlgo["sha256"][i] {
-			t.Errorf("PCR %d mismatch: expected %s, got %s", i,
-				expectedPcrs.HashAlgo["sha256"][i],
-				predictedPcrs.HashAlgo["sha256"][i])
+
+		hexStr := strings.TrimPrefix(strings.ToLower(expectedHex), "0x")
+		expectedBytes, err := hex.DecodeString(hexStr)
+		if err != nil {
+			t.Errorf("PCR %d: decoding expected value %q: %v", i, expectedHex, err)
+			continue
 		}
+
+		predictedSet := allPCRs[i]
+		if len(predictedSet) == 0 {
+			t.Errorf("PCR %d: no predictions produced", i)
+			continue
+		}
+
+		found := false
+		for _, predicted := range predictedSet {
+			if bytes.Equal(predicted, expectedBytes) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			var predicted []string
+			for _, v := range predictedSet {
+				predicted = append(predicted, "0x"+strings.ToUpper(hex.EncodeToString(v)))
+			}
+			t.Errorf("PCR %d: expected %s not in predicted set %v",
+				i, expectedHex, predicted)
+		}
+	}
+}
+
+func TestHashRootfsImage(t *testing.T) {
+	img, err := os.ReadFile("testdata/rootfs/rootfs.img")
+	if err != nil {
+		t.Fatalf("reading rootfs image: %v", err)
+	}
+
+	got, err := HashRootfsImage(img)
+	if err != nil {
+		t.Fatalf("HashRootfsImage: %v", err)
+	}
+
+	// Expected value verified against the EV_IPL event data in tpm-event-log.bin:
+	// event data = "squash4 e19fd58e...\0"
+	const wantHex = "e19fd58e55a3866595b4c3df72789f60225fbffd43605f8ae94acbb1f144713f"
+	if hex.EncodeToString(got) != wantHex {
+		t.Errorf("HashRootfsImage = %x, want %s", got, wantHex)
+	}
+}
+
+func TestPredictPCRsWithRootfsHash(t *testing.T) {
+	const eventLog = "testdata/rootfs/tpm-event-log.bin"
+
+	img, err := os.ReadFile("testdata/rootfs/rootfs.img")
+	if err != nil {
+		t.Fatalf("reading rootfs image: %v", err)
+	}
+
+	rootfsHash, err := HashRootfsImage(img)
+	if err != nil {
+		t.Fatalf("HashRootfsImage: %v", err)
+	}
+
+	allPCRs, err := PredictPCRsFromFiles(eventLog, eventLog, rootfsHash)
+	if err != nil {
+		t.Fatalf("PredictPCRs: %v", err)
+	}
+
+	// Expected PCR 13 verified by direct event log replay with attest.Predict.
+	const wantPCR13 = "69f9bae5df0d0976d5ed4c3f15a61556dd74585c158751f9339b126e654f4431"
+	wantBytes, _ := hex.DecodeString(wantPCR13)
+
+	candidates := allPCRs[13]
+	if len(candidates) == 0 {
+		t.Fatal("PCR[13]: no predictions produced")
+	}
+	found := false
+	for _, v := range candidates {
+		if bytes.Equal(v, wantBytes) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		var got []string
+		for _, v := range candidates {
+			got = append(got, hex.EncodeToString(v))
+		}
+		t.Errorf("PCR[13]: want %s, predicted set: %v", wantPCR13, got)
 	}
 }
 
@@ -197,4 +245,13 @@ func TestEventLogValidation(t *testing.T) {
 	if err := ValidateEventLog(events, false); err != nil {
 		t.Fatalf("ValidateEventLog failed: %v", err)
 	}
+}
+
+// fmtPCRSet formats a [][]byte as hex strings for test output.
+func fmtPCRSet(set [][]byte) []string {
+	var out []string
+	for _, v := range set {
+		out = append(out, fmt.Sprintf("0x%X", v))
+	}
+	return out
 }

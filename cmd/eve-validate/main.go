@@ -7,8 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-
-	"github.com/google/go-attestation/attest"
 )
 
 func contains(m map[int][][]byte, key int, val []byte) bool {
@@ -16,7 +14,6 @@ func contains(m map[int][][]byte, key int, val []byte) bool {
 	if !ok {
 		return false
 	}
-
 	for _, b := range slices {
 		if bytes.Equal(b, val) {
 			return true
@@ -35,7 +32,6 @@ func PcrsMatchExpectedValues(prediction, oldPcrs, currentPcrs string) error {
 		reportedPCRs[pcr.Index] = pcr.Digest
 	}
 
-	// get the old pcrs too, we expect some of them to match
 	oldPcrsValues, err := epcr.GetAttestedPCRs(oldPcrs)
 	if err != nil {
 		return fmt.Errorf("GetAttestedPCRs failed: %v", err)
@@ -48,34 +44,37 @@ func PcrsMatchExpectedValues(prediction, oldPcrs, currentPcrs string) error {
 	expectedPCRs, err := epcr.DeserializePcrsFromFile(prediction)
 	if err != nil {
 		return fmt.Errorf("DeserializePcrsFromFile failed: %v", err)
-	} else {
-		for index, _ := range expectedPCRs {
-			switch index {
-			case 0, 1, 2, 3, 4, 6, 7, 8, 9, 13:
-				if contains(expectedPCRs, index, reportedPCRs[index]) {
-					fmt.Printf("[PASS] PCR %d value %s matches expected", index, hex.EncodeToString(reportedPCRs[index]))
-				} else {
-					fmt.Printf("[ERROR!!!] PCR %d value %s does not match expected", index, hex.EncodeToString(reportedPCRs[index]))
-				}
-			case 5:
-				// we have a special case for PCR 5, just print it for now
-				fmt.Printf("[UNIMPLEMENTED] PCR 5 value: %s", hex.EncodeToString(reportedPCRs[index]))
-			case 14:
-				// PCR 14 must match the exact value of the previously reported known good value,
-				// just print it for now
-				if bytes.Equal(oldPCRs[14], reportedPCRs[14]) {
-					fmt.Printf("[PASS] PCR 14 value %s matches old known good value", hex.EncodeToString(reportedPCRs[index]))
-				} else {
-					fmt.Printf("[ERROR!!!] PCR 14 value %s does not match old known good value", hex.EncodeToString(reportedPCRs[index]))
-				}
-			default:
-				// every other PCR must match the old value
-				if bytes.Equal(oldPCRs[index], reportedPCRs[index]) {
-					fmt.Printf("[PASS] PCR %d value %s matches old known good value", index, hex.EncodeToString(reportedPCRs[index]))
-				} else {
-					fmt.Printf("[ERROR!!!] PCR %d value %s does not match old known good value", index, hex.EncodeToString(reportedPCRs[index]))
-				}
-				continue
+	}
+	for index := range expectedPCRs {
+		switch index {
+		case 0, 1, 2, 3, 4, 6, 7, 8, 9, 13:
+			if contains(expectedPCRs, index, reportedPCRs[index]) {
+				fmt.Printf("[PASS] PCR %d value %s matches expected\n", index, hex.EncodeToString(reportedPCRs[index]))
+			} else {
+				fmt.Printf("[ERROR!!!] PCR %d value %s does not match expected\n", index, hex.EncodeToString(reportedPCRs[index]))
+			}
+		case 5:
+			// PCR 5 reflects the GPT partition table state, which varies across the
+			// 8 synthesized update variants. Validate that the reported value is one
+			// of the predicted values.
+			if contains(expectedPCRs, index, reportedPCRs[index]) {
+				fmt.Printf("[PASS] PCR %d value %s matches expected\n", index, hex.EncodeToString(reportedPCRs[index]))
+			} else {
+				fmt.Printf("[ERROR!!!] PCR %d value %s does not match expected\n", index, hex.EncodeToString(reportedPCRs[index]))
+			}
+		case 14:
+			// PCR 14 must match the exact value of the previously reported known good value
+			if bytes.Equal(oldPCRs[14], reportedPCRs[14]) {
+				fmt.Printf("[PASS] PCR 14 value %s matches old known good value\n", hex.EncodeToString(reportedPCRs[index]))
+			} else {
+				fmt.Printf("[ERROR!!!] PCR 14 value %s does not match old known good value\n", hex.EncodeToString(reportedPCRs[index]))
+			}
+		default:
+			// every other PCR must match the old value
+			if bytes.Equal(oldPCRs[index], reportedPCRs[index]) {
+				fmt.Printf("[PASS] PCR %d value %s matches old known good value\n", index, hex.EncodeToString(reportedPCRs[index]))
+			} else {
+				fmt.Printf("[ERROR!!!] PCR %d value %s does not match old known good value\n", index, hex.EncodeToString(reportedPCRs[index]))
 			}
 		}
 	}
@@ -85,21 +84,20 @@ func PcrsMatchExpectedValues(prediction, oldPcrs, currentPcrs string) error {
 
 func ValidatePcrFive(oldEventLog, currEventLog string) error {
 	// PCR 5 can vary based on the hard disk configuration, but it also shouldn't change
-	// much except attribues of IMAGA/IMGB partition.
-	oldTable, err := epcr.GetGptPartitionTable(oldEventLog, nil, nil, nil, false)
+	// much except attributes of IMGA/IMGB partition.
+	oldTable, err := epcr.GetGptPartitionTableFromFile(oldEventLog, nil, nil, nil, false)
 	if err != nil {
-		return fmt.Errorf("GetGptPartitionTable failed: %v", err)
+		return fmt.Errorf("GetGptPartitionTableFromFile failed: %v", err)
 	}
 
-	currTable, err := epcr.GetGptPartitionTable(currEventLog, nil, nil, nil, false)
+	currTable, err := epcr.GetGptPartitionTableFromFile(currEventLog, nil, nil, nil, false)
 	if err != nil {
-		return fmt.Errorf("GetGptPartitionTable failed: %v", err)
+		return fmt.Errorf("GetGptPartitionTableFromFile failed: %v", err)
 	}
 
 	if len(oldTable) == 0 || len(currTable) == 0 {
 		return fmt.Errorf("partition table is empty")
 	}
-
 	if len(oldTable) != len(currTable) {
 		return fmt.Errorf("partition table length mismatch: old %d, new %d", len(oldTable), len(currTable))
 	}
@@ -113,7 +111,6 @@ func ValidatePcrFive(oldEventLog, currEventLog string) error {
 		if oldName != newName {
 			return fmt.Errorf("partition %d name mismatch: old %s, new %s", i, oldName, newName)
 		}
-
 		if oldEntry.PartitionTypeGUID != newEntry.PartitionTypeGUID {
 			return fmt.Errorf("partition %d type GUID mismatch: old %s, new %s", i,
 				oldEntry.PartitionTypeGUID, newEntry.PartitionTypeGUID)
@@ -130,9 +127,8 @@ func ValidatePcrFive(oldEventLog, currEventLog string) error {
 			return fmt.Errorf("partition %d ending LBA mismatch: old %d, new %d", i,
 				oldEntry.EndingLBA, newEntry.EndingLBA)
 		}
-		// We skip the Attribute check for IMAG/IMGB, as it can vary based on partiton state
-		// being unused, updating, active, etc.
-		if oldName != "IMAGA" && oldName != "IMGB" {
+		// Skip Attribute check for IMGA/IMGB — varies by partition state.
+		if oldName != "IMGA" && oldName != "IMGB" {
 			if oldEntry.Attributes != newEntry.Attributes {
 				return fmt.Errorf("partition %d attributes mismatch: old %d, new %d", i,
 					oldEntry.Attributes, newEntry.Attributes)
@@ -154,7 +150,6 @@ func main() {
 	currPcrValues := flag.String("curr-pcr-values", "", "current PCR values from TPM Quote to validate against")
 	pcrPredictions := flag.String("prediction", "", "gob file with PCR values to validate against")
 
-	// Parse flags
 	flag.Parse()
 
 	if *oldEventLog == "" || *currEventLog == "" || *pcrPredictions == "" || *oldPcrValues == "" || *currPcrValues == "" {
@@ -163,13 +158,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	// First make sure we can trust the event logs
-	if err := validatePcrs(*oldEventLog, *oldPcrValues); err != nil {
+	if err := epcr.ValidateEventLogFromFile(*oldEventLog, *oldPcrValues); err != nil {
 		fmt.Printf("Old event log validation failed: %v\n", err)
 		os.Exit(1)
 	}
-	if err := validatePcrs(*currEventLog, *currPcrValues); err != nil {
+	if err := epcr.ValidateEventLogFromFile(*currEventLog, *currPcrValues); err != nil {
 		fmt.Printf("Current event log validation failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := ValidatePcrFive(*oldEventLog, *currEventLog); err != nil {
+		fmt.Printf("GPT partition layout validation failed: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -179,34 +178,4 @@ func main() {
 	}
 
 	fmt.Printf("PCR values match expected values\n")
-}
-
-func validatePcrs(eventLogFile, PcrsFile string) error {
-	attestPCRs, err := epcr.GetAttestedPCRs(PcrsFile)
-	if err != nil {
-		return fmt.Errorf("GetAttestedPCRs failed: %v", err)
-	}
-
-	content, err := os.ReadFile(eventLogFile)
-	if err != nil {
-		return fmt.Errorf("ReadFile failed: %v", err)
-	}
-	eventLog, err := attest.ParseEventLog(content)
-	if err != nil {
-		return fmt.Errorf("ParseEventLog failed: %v", err)
-	}
-
-	// Reply the eventlog and check if end up with expected PCR values
-	events, err := eventLog.Verify(attestPCRs)
-	if err != nil {
-		return fmt.Errorf("verify failed: %v", err)
-	}
-
-	// If we can trust the eventlog integrity, now we can validate the system
-	// state using custom rules.
-	if err := epcr.ValidateEventLog(events, false); err != nil {
-		return fmt.Errorf("ValidateEventLog failed: %v", err)
-	}
-
-	return nil
 }
