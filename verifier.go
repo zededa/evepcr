@@ -1,18 +1,20 @@
-package eve_pcr_prediction
+package evepcr
 
 import (
 	"bytes"
 	"crypto"
+	_ "crypto/sha256"
+	_ "crypto/sha512"
+	"encoding/binary"
+	"encoding/gob"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
 	"unicode/utf16"
 
-	"encoding/binary"
-	"encoding/gob"
-	"encoding/hex"
+	"eve_pcr_prediction/internal/attest"
 
-	"github.com/google/go-attestation/attest"
 	"gopkg.in/yaml.v2"
 )
 
@@ -26,6 +28,9 @@ import (
 // "EFI PART\0\0" for GPT Partition Table header signature
 var defaultEvent = []byte{0x45, 0x46, 0x49, 0x20, 0x50, 0x41, 0x52, 0x54, 0x00, 0x00}
 
+// Default hash algorithm for PCRs
+var DefaultAlgo = attest.HashSHA256
+
 // Event type string for EFI GPT event
 const (
 	defaultEventString    = "EV_EFI_GPT_EVENT"
@@ -37,12 +42,75 @@ const (
 	maxPcrIndex           = 24
 )
 
-// Default hash algorithm for PCRs
-var DefaultAlgo = attest.HashSHA256
+// squashfs superblock constants, matching GRUB's grub_squash_digest.
+const (
+	squashfsMagic           = uint32(0x73717368) // little-endian "sqsh"
+	squashfsTotalSizeOffset = 40                 // byte offset of total_size (uint64 LE) in superblock
+	measurefsFSName         = "squash4"          // fs name emitted by GRUB measurefs for squashfs
+	pcrMeasurefs            = 13                 // PCR index GRUB measures the rootfs into
+)
 
-// EventTransformer is a function that transforms the event logs, this is called
-// right before the PCR prediction, give a chance to change the event log if needed.
-type EventTransformer func(originalOld *attest.EventLog, old *attest.EventLog, new *attest.EventLog) error
+// GPT partition entry layout constants (TCG EFI spec / UEFI spec).
+const (
+	gptHeaderSize    = 92  // sizeof(EfiPartitionTableHeader)
+	gptNumPartsSize  = 8   // UINT64 NumberOfPartitions in UEFI_GPT_DATA
+	gptEntrySize     = 128 // sizeof(EfiPartitionEntry)
+	gptEntryAttrOff  = 48  // byte offset of Attributes within EfiPartitionEntry
+	gptEntryNameOff  = 56  // byte offset of PartitionName within EfiPartitionEntry
+	gptEntryNameSize = 72  // byte size of PartitionName (UTF-16LE, 36 chars)
+)
+
+// EVE gptprio partition attribute values for each boot state.
+// Layout of the Attributes uint64 (TCG / UEFI spec bits 48-56):
+//
+//	bits 48-51: PRIORITY (4 bits)
+//	bits 52-55: TRIES_LEFT (4 bits)
+//	bit  56:    SUCCESSFUL (1 bit)
+const (
+	gptAttrActive   = uint64(0x0102000000000000) // priority=2, tries_left=0, successful=1
+	gptAttrUpdating = uint64(0x0013000000000000) // priority=3, tries_left=1, successful=0
+	gptAttrInactive = uint64(0x0003000000000000) // priority=3, tries_left=0, successful=0
+	gptAttrZero     = uint64(0x0000000000000000) // not yet installed / no state
+)
+
+type gptVariant struct {
+	imgaAttr    uint64
+	imgbAttr    uint64
+	requireIMGB bool
+}
+
+// gptVariants lists all EVE partition states that affect PCR[5].
+//
+// EVE update cycle state machine (IMGA=src, IMGB=dst as example):
+//
+//	Normal update path:
+//	  IMGA active + IMGB unused  →  SetOtherPartitionStateUpdating  →  IMGA active   + IMGB updating  [state 3]
+//	  IMGA active + IMGB updating →  reboot+GRUB boots IMGB          →  IMGA active   + IMGB inprogress (on disk)
+//	  After EVE marks success     →  MarkCurrentPartitionStateActive  →  IMGA unused   + IMGB active    [state 4]
+//	  IMGA unused + IMGB active   →  SetOtherPartitionStateUpdating  →  IMGA updating  + IMGB active    [state 7]
+//	  ... GRUB boots IMGA, EVE marks success → IMGA active + IMGB unused [state 1]
+//
+//	Fallback path (update attempt fails, tries_left hits 0):
+//	  IMGA active + IMGB inprogress →  reboot (IMGB not bootable)    →  IMGA active   + IMGB inprogress [state 8]
+//	  IMGA inprogress + IMGB active →  (IMGA failed, fallback)        →  IMGA inprogress+ IMGB active    [state 5]
+//	  IMGA inprogress + IMGB active →  SetOtherPartitionStateUpdating →  IMGA inprogress+ IMGB updating  [state 6]
+//
+//	Single-partition or IMGB-absent variants:
+//	  IMGA active   + no IMGB  [state 1a]
+//	  IMGA updating + no IMGB  [state 2]
+var gptVariants = []gptVariant{
+	// IMGB absent / unused
+	{gptAttrActive, gptAttrZero, false},   // state 1a/1: IMGA active,   IMGB absent/unused
+	{gptAttrUpdating, gptAttrZero, false}, // state 2:    IMGA updating, IMGB absent/unused
+	// Normal update path
+	{gptAttrActive, gptAttrUpdating, true}, // state 3: IMGA active,    IMGB first-boot update
+	{gptAttrZero, gptAttrActive, true},     // state 4: IMGA unused,    IMGB active (post-success)
+	{gptAttrUpdating, gptAttrActive, true}, // state 7: IMGA updating,  IMGB active (forcefallback/re-update)
+	// Failure path
+	{gptAttrActive, gptAttrInactive, true},   // state 8: IMGA active,    IMGB inprogress/failed
+	{gptAttrInactive, gptAttrActive, true},   // state 5: IMGA inprogress,IMGB active
+	{gptAttrInactive, gptAttrUpdating, true}, // state 6: IMGA inprogress,IMGB updating
+}
 
 type PcrYml struct {
 	HashAlgo map[string]map[int]string `yaml:"pcrs"`
@@ -148,7 +216,7 @@ func getHashAlgo(algo string) crypto.Hash {
 }
 
 func getContentDigest(data []byte) [][]byte {
-	digests := make([][]byte, 4)
+	digests := make([][]byte, 0, 4)
 	for _, hashAlgo := range []crypto.Hash{crypto.SHA1, crypto.SHA256, crypto.SHA384, crypto.SHA512} {
 		digest := crypto.Hash(hashAlgo).New()
 		digest.Write(data)
@@ -170,17 +238,14 @@ func contentMatchesDigest(ev attest.Event) bool {
 }
 
 func utf16LEToString(buf []byte) (string, error) {
-	if len(buf)%2 != 0 {
+	if len(buf) < 2 || len(buf)%2 != 0 {
 		return "", fmt.Errorf("invalid UTF-16LE buffer length: %d", len(buf))
 	}
 
-	// 1MB sanity check
-	if len(buf) > 1<<20 {
-		return "", fmt.Errorf("UTF-16 buffer too large: %d bytes", len(buf))
-	}
-
 	u16 := make([]uint16, len(buf)/2)
-	binary.Read(bytes.NewReader(buf), binary.LittleEndian, &u16)
+	if err := binary.Read(bytes.NewReader(buf), binary.LittleEndian, &u16); err != nil {
+		return "", fmt.Errorf("reading UTF-16LE buffer: %w", err)
+	}
 	runes := utf16.Decode(u16)
 	// trim any trailing nulls
 	s := string(runes)
@@ -380,6 +445,38 @@ func ValidateEventLog(events []attest.Event, verbose bool) error {
 	return nil
 }
 
+// ValidateEventLogFromBytes verifies that the event log replays correctly against
+// the provided PCR values (indexed by PCR index, SHA-256 digest as []byte).
+// Returns the parsed and verified events on success.
+func ValidateEventLogFromBytes(eventLogBytes []byte, pcrValues map[int][]byte) ([]attest.Event, error) {
+	var attestPCRs []attest.PCR
+	for index, digest := range pcrValues {
+		attestPCRs = append(attestPCRs, attest.PCR{
+			Index:     index,
+			Digest:    digest,
+			DigestAlg: crypto.SHA256,
+		})
+	}
+
+	eventLog, err := attest.ParseEventLog(eventLogBytes)
+	if err != nil {
+		return nil, fmt.Errorf("ParseEventLog failed: %w", err)
+	}
+
+	events, err := eventLog.Verify(attestPCRs)
+	if err != nil {
+		return nil, fmt.Errorf("event log replay failed: %w", err)
+	}
+
+	if err := ValidateEventLog(events, false); err != nil {
+		return nil, fmt.Errorf("event log validation failed: %w", err)
+	}
+
+	return events, nil
+}
+
+// ValidateEventLogFromFile replays the event log at eventLogFile against the
+// PCR values in pcrYaml (YAML format), then runs the security validation rules.
 func ValidateEventLogFromFile(eventLogFile, pcrYaml string) error {
 	attestPCRs, err := GetAttestedPCRs(pcrYaml)
 	if err != nil {
@@ -411,43 +508,216 @@ func ValidateEventLogFromFile(eventLogFile, pcrYaml string) error {
 	return nil
 }
 
-// PredictAllPCRs predicts all PCR values for the four scenarios:
-// A-active, A-updating, B-active, B-updating
-// and returns the union of all PCR values for each PCR index.
-func PredictAllPCRs(old, newA, newAUpdating, newB, newBUpdating string, eventTransform EventTransformer, hashAlgo *attest.HashAlg, startEvent *string, startEventContent []byte) (map[int][][]byte, error) {
-	aActivePcrs, err := PredictPCRs(old, newA, eventTransform, hashAlgo, startEvent, startEventContent)
-	if err != nil {
-		return nil, fmt.Errorf("failed to predict aActivePcrs: %w", err)
+// findGPTEventIndex returns the index of the first EV_EFI_GPT_EVENT that
+// contains the EFI partition table signature in the event log.
+func findGPTEventIndex(el *attest.EventLog) (int, error) {
+	for i, ev := range el.Events(DefaultAlgo) {
+		if ev.Type.String() == defaultEventString && bytes.Contains(ev.Data, defaultEvent) {
+			return i, nil
+		}
 	}
-
-	aUpdatingPcrs, err := PredictPCRs(old, newAUpdating, eventTransform, hashAlgo, startEvent, startEventContent)
-	if err != nil {
-		return nil, fmt.Errorf("failed to predict aUpdatingPcrs: %w", err)
-	}
-
-	bActivePcrs, err := PredictPCRs(old, newB, eventTransform, hashAlgo, startEvent, startEventContent)
-	if err != nil {
-		return nil, fmt.Errorf("failed to predict bActivePcrs: %w", err)
-	}
-
-	bUpdatingPcrs, err := PredictPCRs(old, newBUpdating, eventTransform, hashAlgo, startEvent, startEventContent)
-	if err != nil {
-		return nil, fmt.Errorf("failed to predict bUpdatingPcrs: %w", err)
-	}
-
-	union := unionByIndex(aActivePcrs, aUpdatingPcrs, bActivePcrs, bUpdatingPcrs)
-	return union, nil
+	return -1, fmt.Errorf("GPT event not found in event log")
 }
 
-// GetGptPartitionTable extracts the partition table from the event log file,
-// if startEvent and startEventContent are nil, default values will be used.
-func GetGptPartitionTable(eventLogFile string, hashAlgo *attest.HashAlg, startEvent *string, startEventContent []byte, verbose bool) ([]PartitionTableEntry, error) {
-	eventLog, err := os.ReadFile(eventLogFile)
+// hasPartitionInGPT returns true if the raw GPT event data contains a partition
+// entry with the given UTF-16LE name.
+func hasPartitionInGPT(gptData []byte, name string) bool {
+	if len(gptData) < gptHeaderSize+gptNumPartsSize {
+		return false
+	}
+	numParts := binary.LittleEndian.Uint64(gptData[gptHeaderSize:])
+	base := gptHeaderSize + gptNumPartsSize
+	for i := 0; i < int(numParts); i++ {
+		off := base + i*gptEntrySize
+		if off+gptEntrySize > len(gptData) {
+			break
+		}
+		n, err := utf16LEToString(gptData[off+gptEntryNameOff : off+gptEntryNameOff+gptEntryNameSize])
+		if err == nil && n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// patchGPTAttributes returns a copy of gptData with IMGA and IMGB Attributes
+// fields set to imgaAttr and imgbAttr respectively.
+func patchGPTAttributes(gptData []byte, imgaAttr, imgbAttr uint64) []byte {
+	out := make([]byte, len(gptData))
+	copy(out, gptData)
+	if len(out) < gptHeaderSize+gptNumPartsSize {
+		return out
+	}
+	numParts := binary.LittleEndian.Uint64(out[gptHeaderSize:])
+	base := gptHeaderSize + gptNumPartsSize
+	for i := 0; i < int(numParts); i++ {
+		off := base + i*gptEntrySize
+		if off+gptEntrySize > len(out) {
+			break
+		}
+		n, err := utf16LEToString(out[off+gptEntryNameOff : off+gptEntryNameOff+gptEntryNameSize])
+		if err != nil {
+			continue
+		}
+		switch n {
+		case "IMGA":
+			binary.LittleEndian.PutUint64(out[off+gptEntryAttrOff:], imgaAttr)
+		case "IMGB":
+			binary.LittleEndian.PutUint64(out[off+gptEntryAttrOff:], imgbAttr)
+		}
+	}
+	return out
+}
+
+// findGrubStageOne returns the index of the EVE GRUB stage 1 load event.
+// It identifies this as the EV_EFI_BOOT_SERVICES_APPLICATION event immediately
+// followed by an EV_IPL event containing "gptprio.next".
+func findGrubStageOne(el *attest.EventLog) (int, error) {
+	events := el.Events(DefaultAlgo)
+	for i, ev := range events {
+		if ev.Type.String() != "EV_EFI_BOOT_SERVICES_APPLICATION" {
+			continue
+		}
+		if i+1 < len(events) {
+			next := events[i+1]
+			if next.Type.String() == "EV_IPL" && bytes.Contains(next.Data, []byte("gptprio.next")) {
+				return i, nil
+			}
+		}
+	}
+	return -1, fmt.Errorf("GRUB stage 1 event not found")
+}
+
+// predictVariant predicts PCR values for one gpt partition state variant.
+// It clones dst, patches its GPT event attributes, merges with src at gptIdx,
+// restores the original GRUB stage 1 hash, then predicts all PCR values.
+// If rootfsHash is non-nil it is used compute the value of PCR 13.
+func predictVariant(originalSrc, src, dst *attest.EventLog, gptIdx int, v gptVariant, rootfsHash []byte) ([][]byte, error) {
+	// Clone dst and patch its GPT event for this variant.
+	dstClone := dst.Clone()
+	gptData, _, err := dstClone.GetEventData(gptIdx)
+	if err != nil {
+		return nil, fmt.Errorf("getting dst GPT event: %w", err)
+	}
+	patched := patchGPTAttributes(gptData, v.imgaAttr, v.imgbAttr)
+	if err := dstClone.PatchEventData(gptIdx, patched); err != nil {
+		return nil, fmt.Errorf("patching GPT event: %w", err)
+	}
+
+	// Merge: src events up to gptIdx, then patched dst events from gptIdx onward.
+	merged := src.Clone()
+	if err := merged.OverrideEvents(gptIdx, dstClone); err != nil {
+		return nil, fmt.Errorf("merging event logs: %w", err)
+	}
+
+	// Restore the GRUB stage 1 binary hash from the original source log.
+	if grubIdx, err := findGrubStageOne(originalSrc); err == nil {
+		data, digests, err := originalSrc.GetEventData(grubIdx)
+		if err == nil {
+			_ = merged.SetEventData(grubIdx, data, digests)
+		}
+	}
+
+	// If a rootfs image hash is provided, patch the measurefs EV_IPL event so
+	// PCR 13 is derived from the known image content.
+	if len(rootfsHash) > 0 {
+		if measIdx, err := findMeasurefsEventIndex(merged); err == nil {
+			eventData := []byte(fmt.Sprintf("%s %s\x00", measurefsFSName, hex.EncodeToString(rootfsHash)))
+			var newDigests []attest.Digest
+			for _, alg := range []crypto.Hash{crypto.SHA1, crypto.SHA256, crypto.SHA384, crypto.SHA512} {
+				if !alg.Available() {
+					continue
+				}
+				h := alg.New()
+				h.Write(rootfsHash)
+				newDigests = append(newDigests, attest.NewDigest(alg, h.Sum(nil)))
+			}
+			if err := merged.SetEventData(measIdx, eventData, newDigests); err != nil {
+				return nil, fmt.Errorf("setting measurefs event: %w", err)
+			}
+		}
+	}
+
+	// Predict all PCRs.
+	pcrs := make([][]byte, maxPcrIndex)
+	for i := range maxPcrIndex {
+		pcr := attest.PCR{Index: i, DigestAlg: crypto.SHA256, Digest: make([]byte, 32)}
+		p, err := merged.Predict(pcr)
+		if err != nil {
+			return nil, fmt.Errorf("predicting PCR[%d]: %w", i, err)
+		}
+		pcrs[i] = p
+	}
+	return pcrs, nil
+}
+
+// PredictPCRs predicts the full set of PCR values that a device will have after
+// updating from the firmware captured in srcLog to the firmware in dstLog.
+//
+// srcLog is the baseline event log bytes from the device's last known-good boot.
+// dstLog is the incoming event log bytes received from the device during attestation.
+//
+// If rootfsHash is non-nil it is used compute the value of PCR 13.
+// Returns the union of predicted PCR values across all synthesized states.
+func PredictPCRs(srcLog, dstLog []byte, rootfsHash []byte) (map[int][][]byte, error) {
+	src, err := attest.ParseEventLog(srcLog)
+	if err != nil {
+		return nil, fmt.Errorf("parsing src event log: %w", err)
+	}
+	dst, err := attest.ParseEventLog(dstLog)
+	if err != nil {
+		return nil, fmt.Errorf("parsing dst event log: %w", err)
+	}
+
+	gptIdx, err := findGPTEventIndex(src)
 	if err != nil {
 		return nil, err
 	}
 
-	events, err := attest.ParseEventLog(eventLog)
+	dstGPTData, _, err := dst.GetEventData(gptIdx)
+	if err != nil {
+		return nil, fmt.Errorf("getting dst GPT event: %w", err)
+	}
+	hasIMGB := hasPartitionInGPT(dstGPTData, "IMGB")
+
+	originalSrc := src.Clone()
+
+	var allPCRSets [][][]byte
+	for _, v := range gptVariants {
+		if v.requireIMGB && !hasIMGB {
+			continue
+		}
+		pcrSet, err := predictVariant(originalSrc, src, dst, gptIdx, v, rootfsHash)
+		if err != nil {
+			return nil, fmt.Errorf("variant prediction: %w", err)
+		}
+		allPCRSets = append(allPCRSets, pcrSet)
+	}
+
+	if len(allPCRSets) == 0 {
+		return nil, fmt.Errorf("no variants produced: IMGA partition not found in dst event log")
+	}
+
+	return unionByIndex(allPCRSets...), nil
+}
+
+// PredictPCRsFromFiles is a wrapper around PredictPCRs
+func PredictPCRsFromFiles(srcFile, dstFile string, rootfsHash []byte) (map[int][][]byte, error) {
+	srcBytes, err := os.ReadFile(srcFile)
+	if err != nil {
+		return nil, fmt.Errorf("reading src event log: %w", err)
+	}
+	dstBytes, err := os.ReadFile(dstFile)
+	if err != nil {
+		return nil, fmt.Errorf("reading dst event log: %w", err)
+	}
+	return PredictPCRs(srcBytes, dstBytes, rootfsHash)
+}
+
+// GetGptPartitionTable extracts the partition table from the event log bytes.
+// If startEvent and startEventContent are nil, default values will be used.
+func GetGptPartitionTable(eventLogBytes []byte, hashAlgo *attest.HashAlg, startEvent *string, startEventContent []byte, verbose bool) ([]PartitionTableEntry, error) {
+	events, err := attest.ParseEventLog(eventLogBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -492,88 +762,19 @@ func GetGptPartitionTable(eventLogFile string, hashAlgo *attest.HashAlg, startEv
 	return nil, fmt.Errorf("error no event found with data containing %s", *startEvent)
 }
 
-// PredictPCRs predicts PCR values based on old and new event logs,
-// if startEvent and startEventContent are nil, default values will be used.
-func PredictPCRs(oldEventLogFile, newEventLogFile string, eventTransform EventTransformer, hashAlgo *attest.HashAlg, startEvent *string, startEventContent []byte) ([][]byte, error) {
-	if startEvent == nil {
-		se := defaultEventString
-		startEvent = &se
-	}
-	if startEventContent == nil {
-		startEventContent = defaultEvent
-	}
-	if hashAlgo == nil {
-		hl := DefaultAlgo
-		hashAlgo = &hl
-	}
-
-	oldEventLogContents, err := os.ReadFile(oldEventLogFile)
+// GetGptPartitionTableFromFile is a convenience wrapper around GetGptPartitionTable
+// for tools that work with files on disk.
+func GetGptPartitionTableFromFile(eventLogFile string, hashAlgo *attest.HashAlg, startEvent *string, startEventContent []byte, verbose bool) ([]PartitionTableEntry, error) {
+	data, err := os.ReadFile(eventLogFile)
 	if err != nil {
 		return nil, err
 	}
-	newEventLogContents, err := os.ReadFile(newEventLogFile)
-	if err != nil {
-		return nil, err
-	}
-	oldEventLog, err := attest.ParseEventLog(oldEventLogContents)
-	if err != nil {
-		return nil, err
-	}
-	newEventLog, err := attest.ParseEventLog(newEventLogContents)
-	if err != nil {
-		return nil, err
-	}
-
-	// make a copy of the original old events, to pass to the transformer
-	originalOldEvents := oldEventLog.Clone()
-
-	index := -1
-	for i, event := range oldEventLog.Events(*hashAlgo) {
-		if event.Type.String() == *startEvent && bytes.Contains(event.Data, startEventContent) {
-			index = i
-			break
-		}
-	}
-	if index == -1 {
-		return nil, fmt.Errorf("error no event found with data containing %s", *startEvent)
-	}
-
-	// Replace the events at index with events from newEventLog
-	err = oldEventLog.OverrideEvents(index, newEventLog)
-	if err != nil {
-		return nil, err
-	}
-
-	// apply any transformation if provided
-	if eventTransform != nil {
-		err = eventTransform(originalOldEvents, oldEventLog, newEventLog)
-		if err != nil {
-			return nil, fmt.Errorf("error transforming events: %v", err)
-		}
-	}
-
-	// Predict PCRs from 0 to 24
-	pcrs := make([][]byte, maxPcrIndex)
-	for i := range maxPcrIndex {
-		pcr := attest.PCR{Index: i, DigestAlg: crypto.SHA256, Digest: make([]byte, 32)}
-		p, err := oldEventLog.Predict(pcr)
-		if err != nil {
-			return nil, fmt.Errorf("error predicting PCR[%d]: %v", i, err)
-		}
-
-		pcrs[i] = p
-	}
-
-	return pcrs, nil
+	return GetGptPartitionTable(data, hashAlgo, startEvent, startEventContent, verbose)
 }
 
-// DumpEvents dumps all events in the event log file
-func DumpEvents(EventLogFile string, hashAlgo *attest.HashAlg) error {
-	evntlogFile, err := os.ReadFile(EventLogFile)
-	if err != nil {
-		return err
-	}
-	eventLog, err := attest.ParseEventLog(evntlogFile)
+// DumpEvents dumps all events in the event log bytes.
+func DumpEvents(eventLogBytes []byte, hashAlgo *attest.HashAlg) error {
+	eventLog, err := attest.ParseEventLog(eventLogBytes)
 	if err != nil {
 		return err
 	}
@@ -594,6 +795,15 @@ func DumpEvents(EventLogFile string, hashAlgo *attest.HashAlg) error {
 	}
 
 	return nil
+}
+
+// DumpEventsFromFile is a wrapper around DumpEvents
+func DumpEventsFromFile(eventLogFile string, hashAlgo *attest.HashAlg) error {
+	data, err := os.ReadFile(eventLogFile)
+	if err != nil {
+		return err
+	}
+	return DumpEvents(data, hashAlgo)
 }
 
 // SerializePcrsToFile serializes the PCRs map to a file using gob encoding
@@ -624,4 +834,46 @@ func DeserializePcrsFromFile(filename string) (map[int][][]byte, error) {
 	}
 
 	return data, nil
+}
+
+// HashRootfsImage computes the SHA-256 digest of a squashfs rootfs image in
+// exactly the same way GRUB's measurefs command does before extending PCR 13,
+// which basically is <fs_name> <hex_hash>\0".
+//
+// The returned hash should be passed to PredictPCRs as rootfsHash.
+func HashRootfsImage(imageBytes []byte) ([]byte, error) {
+	if len(imageBytes) < squashfsTotalSizeOffset+4 {
+		return nil, fmt.Errorf("image too small for squashfs superblock (%d bytes)", len(imageBytes))
+	}
+
+	magic := binary.LittleEndian.Uint32(imageBytes[0:4])
+	if magic != squashfsMagic {
+		return nil, fmt.Errorf("not a squashfs image: magic 0x%08x (expected 0x%08x)", magic, squashfsMagic)
+	}
+
+	totalSize := uint64(binary.LittleEndian.Uint32(imageBytes[squashfsTotalSizeOffset : squashfsTotalSizeOffset+4]))
+	if totalSize == 0 {
+		return nil, fmt.Errorf("squashfs total_size is zero")
+	}
+	if uint64(len(imageBytes)) < totalSize {
+		return nil, fmt.Errorf("image truncated: squashfs declares %d bytes, only %d available", totalSize, len(imageBytes))
+	}
+
+	h := crypto.SHA256.New()
+	h.Write(imageBytes[:totalSize])
+	return h.Sum(nil), nil
+}
+
+// findMeasurefsEventIndex returns the index of the GRUB measurefs EV_IPL
+// event in PCR 13. The event data has the form "<fs_name> <hex_hash>\0".
+func findMeasurefsEventIndex(el *attest.EventLog) (int, error) {
+	prefix := []byte(measurefsFSName + " ")
+	for i, ev := range el.Events(DefaultAlgo) {
+		if ev.Index == pcrMeasurefs &&
+			ev.Type.String() == "EV_IPL" &&
+			bytes.HasPrefix(ev.Data, prefix) {
+			return i, nil
+		}
+	}
+	return -1, fmt.Errorf("measurefs EV_IPL event not found in PCR %d", pcrMeasurefs)
 }
