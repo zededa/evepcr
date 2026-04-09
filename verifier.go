@@ -16,9 +16,9 @@ import (
 	"strings"
 	"unicode/utf16"
 
-	"github.com/zededa/evepcr/internal/attest"
+	"strconv"
 
-	"gopkg.in/yaml.v2"
+	"github.com/zededa/evepcr/internal/attest"
 )
 
 // Refrences:
@@ -115,9 +115,7 @@ var gptVariants = []gptVariant{
 	{gptAttrInactive, gptAttrUpdating, true}, // state 6: IMGA inprogress,IMGB updating
 }
 
-type PcrYml struct {
-	HashAlgo map[string]map[int]string `yaml:"pcrs"`
-}
+type PcrYml map[string]map[int]string
 
 type EfiPartitionTableHeader struct {
 	Signature                [8]byte
@@ -383,21 +381,53 @@ func preValidateEventLog(events []attest.Event, verbose bool) error {
 	return nil
 }
 
-// ReadPCRs reads PCR values from a YAML file and returns a PcrYml struct
+// ReadPCRs parses a tpm2 pcrread YAML file into a PcrYml map.
+// tpm2 pcrread produces output like:
+//
+//	sha256:
+//	  0 : 0xABCD...
+//	  14: 0xEF01...
+//
+// Standard YAML parsers mishandle this format in two ways: the top-level keys
+// may be indented (invalid at root level), and 0x... values are treated as
+// YAML 1.1 hex integers rather than strings. We parse line-by-line instead.
 func ReadPCRs(file string, verbose bool) (PcrYml, error) {
 	f, err := os.ReadFile(file)
 	if err != nil {
-		return PcrYml{}, fmt.Errorf("error while reading PCRs YAML file %s: %w", file, err)
+		return nil, fmt.Errorf("error while reading PCRs YAML file %s: %w", file, err)
 	}
 
-	var pcrs PcrYml
-	err = yaml.Unmarshal(f, &pcrs)
-	if err != nil {
-		return PcrYml{}, fmt.Errorf("error while unmarshalling PCRs YAML file %s: %w", file, err)
+	pcrs := make(PcrYml)
+	var currentAlgo string
+
+	for _, rawLine := range strings.Split(string(f), "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		// Algorithm header: "sha256:" (ends with colon, no value after it).
+		if strings.HasSuffix(line, ":") {
+			currentAlgo = strings.TrimSuffix(line, ":")
+			pcrs[currentAlgo] = make(map[int]string)
+			continue
+		}
+		// PCR entry: "N : 0xHEX" or "N: 0xHEX"
+		if currentAlgo == "" {
+			continue
+		}
+		colonIdx := strings.Index(line, ":")
+		if colonIdx < 0 {
+			continue
+		}
+		index, err := strconv.Atoi(strings.TrimSpace(line[:colonIdx]))
+		if err != nil {
+			continue
+		}
+		pcrs[currentAlgo][index] = strings.TrimSpace(line[colonIdx+1:])
 	}
 
 	if verbose {
-		for hashAlgo, indexes := range pcrs.HashAlgo {
+		for hashAlgo, indexes := range pcrs {
 			fmt.Printf("%s:\n", hashAlgo)
 			for index, value := range indexes {
 				fmt.Printf("  %d: %s\n", index, value)
@@ -416,7 +446,7 @@ func GetAttestedPCRs(file string) ([]attest.PCR, error) {
 	}
 
 	var attestPCRs []attest.PCR
-	for hashAlgo, indexes := range ymlPcrs.HashAlgo {
+	for hashAlgo, indexes := range ymlPcrs {
 		for index, value := range indexes {
 			// remove 0x prefix
 			if strings.ToLower(value[:2]) == "0x" {
