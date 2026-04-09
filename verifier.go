@@ -701,7 +701,26 @@ func PredictPCRs(srcLog, dstLog []byte, rootfsHash []byte) (map[int][][]byte, er
 		return nil, fmt.Errorf("no variants produced: IMGA partition not found in dst event log")
 	}
 
-	return unionByIndex(allPCRSets...), nil
+	result := unionByIndex(allPCRSets...)
+
+	// For PCRs with no predicted final value, include both all-zeros
+	// and all-0xFF (TPMs pre-initialise PCR values).
+	allZero := make([]byte, 32)
+	allFF := bytes.Repeat([]byte{0xFF}, 32)
+	for i := 0; i < maxPcrIndex; i++ {
+		hasValue := false
+		for _, v := range result[i] {
+			if len(v) > 0 {
+				hasValue = true
+				break
+			}
+		}
+		if !hasValue {
+			result[i] = [][]byte{allZero, allFF}
+		}
+	}
+
+	return result, nil
 }
 
 // PredictPCRsFromFiles is a wrapper around PredictPCRs
