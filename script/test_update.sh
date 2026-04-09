@@ -9,16 +9,18 @@
 # measurements before and after an update, then validates that the prediction
 # tool correctly forecasts the post-update PCR values.
 #
-# Usage: ./test_update.sh [--skip-build]
+# Usage: ./test_update.sh [--skip-build] [--predict]
 #
 
 set -euo pipefail
 
 # ── option parsing ─────────────────────────────────────────────────────────────
 SKIP_BUILD=false
+PREDICT_ONLY=false
 for arg in "$@"; do
     case "$arg" in
-        --skip-build) SKIP_BUILD=true ;;
+        --skip-build)  SKIP_BUILD=true ;;
+        --predict)     PREDICT_ONLY=true ;;
         *) echo "[ERROR] Unknown option: $arg" >&2; exit 1 ;;
     esac
 done
@@ -73,6 +75,7 @@ ssh_cmd() {
     ssh -i "$SSH_KEY" -p "$SSH_PORT" \
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR \
         -o ConnectTimeout=5 \
         root@localhost "$@"
 }
@@ -127,6 +130,22 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if $PREDICT_ONLY; then
+    log_info "=== --predict: skipping to step 14 ==="
+    # Jump straight to the prediction step; measurements must already exist.
+    for f in "$BASELINE_EVENTLOG" "$UPDATED_EVENTLOG" "$UPDATED_PCRS" "$BASELINE_PCRS" "$ROOTFS_V2"; do
+        if [ ! -f "$f" ]; then
+            log_error "Required file not found: $f (run without --predict first)"
+            exit 1
+        fi
+    done
+    # Still need the Go tools built.
+    for tool_name in eve-predict eve-validate eve-rootfs-hash; do
+        log_info "Building $tool_name..."
+        (cd "$REPO_ROOT/cmd/$tool_name" && go build -o "$tool_name" .)
+    done
+else
+
 # ── step 1: prerequisites and directory setup ─────────────────────────────────
 
 log_info "=== Step 1: Prerequisites ==="
@@ -140,15 +159,10 @@ require_tool ssh-keygen
 
 mkdir -p "$WORK_DIR" "$ROOTFS_DIR" "$MEASUREMENTS_DIR"
 
-# Build Go tools if not already built.
+# Build Go tools.
 for tool_name in eve-predict eve-validate eve-rootfs-hash; do
-    tool_bin="$REPO_ROOT/cmd/$tool_name/$tool_name"
-    if [ ! -x "$tool_bin" ]; then
-        log_info "Building $tool_name..."
-        (cd "$REPO_ROOT/cmd/$tool_name" && go build -o "$tool_name" .)
-    else
-        log_info "$tool_name already built."
-    fi
+    log_info "Building $tool_name..."
+    (cd "$REPO_ROOT/cmd/$tool_name" && go build -o "$tool_name" .)
 done
 
 # ── step 2: fetch EVE source ───────────────────────────────────────────────────
@@ -307,17 +321,32 @@ ssh_cmd "eve exec vtpm tpm2 pcrread" > "$UPDATED_PCRS"
 log_info "Saved: $UPDATED_EVENTLOG"
 log_info "Saved: $UPDATED_PCRS"
 
+fi # end of steps 1-13 (skipped by --predict)
+
 # ── step 14: predict PCR values ───────────────────────────────────────────────
 
-log_info "=== Step 14: Predict post-update PCR values ==="
+log_info "=== Step 14: Predict and validate post-update PCR values ==="
+
+# Extract PCR 14 (SHA-256) from the baseline — it must remain unchanged across
+# the update just like the firmware PCRs.
+BASELINE_PCR14=$(awk '
+    /^[[:space:]]*sha256[[:space:]]*:/          { in_sha256=1; next }
+    /^[[:space:]]*sha[0-9]/ && !/sha256/        { in_sha256=0 }
+    in_sha256 && /^[[:space:]]*14[[:space:]]*:/ { val=$NF; sub(/^0[xX]/, "", val); print tolower(val); exit }
+' "$BASELINE_PCRS")
+if [ -z "$BASELINE_PCR14" ]; then
+    log_error "Could not extract PCR 14 (sha256) from $BASELINE_PCRS"
+    exit 1
+fi
+log_info "Baseline PCR 14 (sha256): $BASELINE_PCR14"
 
 "$EVE_PREDICT" \
     -old     "$BASELINE_EVENTLOG" \
     -new     "$UPDATED_EVENTLOG" \
     -rootfs  "$ROOTFS_V2" \
     -out     "$PREDICTIONS_GOB" \
-    -verbose
-
-log_info "Predictions written to $PREDICTIONS_GOB"
+    -compare "$UPDATED_PCRS" \
+    -verbose \
+    "14:$BASELINE_PCR14"
 
 log_info "=== Test complete ==="
