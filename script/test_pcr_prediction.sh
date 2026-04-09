@@ -3,13 +3,13 @@
 # Copyright (c) 2026 Zededa, Inc.
 # SPDX-License-Identifier: Apache-2.0
 #
-# test_update.sh — end-to-end test for TPM PCR prediction across EVE OS updates.
+# test_pcr_prediction.sh — end-to-end test for TPM PCR prediction across EVE OS updates.
 #
 # Boots two consecutive EVE versions in QEMU (TPM enabled), captures TPM
 # measurements before and after an update, then validates that the prediction
 # tool correctly forecasts the post-update PCR values.
 #
-# Usage: ./test_update.sh [--skip-build] [--predict]
+# Usage: ./test_pcr_prediction.sh [--skip-build] [--predict]
 #
 
 set -euo pipefail
@@ -38,7 +38,7 @@ EVE_RELEASES_URL="https://github.com/lf-edge/eve/releases/download"
 ROOTFS_ASSET="amd64.kvm.generic.rootfs.img"
 
 # Working directory
-WORK_DIR="$PWD/eve-tpm-test"
+WORK_DIR="$PWD/pcrpred-test-workdir"
 
 # ── derived paths ─────────────────────────────────────────────────────────────
 
