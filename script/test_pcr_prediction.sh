@@ -26,7 +26,7 @@ for arg in "$@"; do
 done
 
 # ── configuration ─────────────────────────────────────────────────────────────
-# Two consecutive EVE release tags to test. VERSION_2 must be newer.
+# Two consecutive EVE release tags to test.
 EVE_VERSION_1="16.1.0"
 EVE_VERSION_2="16.11.0"
 
@@ -38,7 +38,7 @@ EVE_RELEASES_URL="https://github.com/lf-edge/eve/releases/download"
 ROOTFS_ASSET="amd64.kvm.generic.rootfs.img"
 
 # Working directory
-WORK_DIR="$PWD/pcrpred-test-workdir"
+WORK_DIR="$PWD/out/pcrpred-test-workdir"
 
 # ── derived paths ─────────────────────────────────────────────────────────────
 
@@ -63,7 +63,14 @@ UPDATED_EVENTLOG="$MEASUREMENTS_DIR/updated_eventlog"
 UPDATED_PCRS="$MEASUREMENTS_DIR/updated_pcrs.yaml"
 PREDICTIONS_GOB="$MEASUREMENTS_DIR/predictions.gob"
 
+ADAM_REPO_URL="https://github.com/shjala/adam.git"
+ADAM_BRANCH="MinimalistAdam"
+ADAM_DIR="$WORK_DIR/adam"
+ADAM_BUILD_LOG="$WORK_DIR/adam_build.log"
+ADAM_RUN_LOG="$WORK_DIR/adam_run.log"
+
 QEMU_PID=""
+ADAM_PID=""
 EVE_RUN_LOG=""
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -123,6 +130,10 @@ reboot_and_wait() {
 }
 
 cleanup() {
+    if [ -n "$ADAM_PID" ] && kill -0 "$ADAM_PID" 2>/dev/null; then
+        log_info "Stopping Adam (PID $ADAM_PID)..."
+        kill "$ADAM_PID" || true
+    fi
     if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" 2>/dev/null; then
         log_info "Stopping QEMU (PID $QEMU_PID)..."
         kill "$QEMU_PID" || true
@@ -219,14 +230,39 @@ mkdir -p "$EVE_DIR/conf"
 cp "${SSH_KEY}.pub" "$EVE_DIR/conf/authorized_keys"
 log_info "Public key installed to $EVE_DIR/conf/authorized_keys"
 
-# ── step 6: wait for user to provision controller certs ───────────────────────
+# ── step 6: set up Adam controller ───────────────────────────────────────────
 
-echo ""
-echo "============================================================"
-echo "ACTION REQUIRED: Configure your controller and install certs"
-echo "============================================================"
-echo ""
-read -rp "Press Enter when conf files are in place..."
+log_info "=== Step 6: Set up Adam controller ==="
+
+if [ ! -d "$ADAM_DIR/.git" ]; then
+    log_info "Cloning Adam repository to $ADAM_DIR ..."
+    git clone --quiet "$ADAM_REPO_URL" "$ADAM_DIR"
+else
+    log_info "Adam repository already cloned."
+fi
+
+pushd "$ADAM_DIR" > /dev/null
+git checkout "$ADAM_BRANCH"
+popd > /dev/null
+
+log_info "Building Adam (branch $ADAM_BRANCH) → $ADAM_BUILD_LOG"
+pushd "$ADAM_DIR" > /dev/null
+make > "$ADAM_BUILD_LOG" 2>&1
+popd > /dev/null
+log_info "Adam built."
+
+log_info "Running bootstrap.sh → $ADAM_RUN_LOG"
+pushd "$ADAM_DIR" > /dev/null
+EVE_CONFIG="$EVE_DIR/conf" OVERWRITE_YES=true ./bootstrap.sh --yes > "$ADAM_RUN_LOG" 2>&1 &
+ADAM_PID=$!
+popd > /dev/null
+log_info "Adam started (PID $ADAM_PID)"
+
+log_info "Waiting for Adam to start..."
+until grep -q "Starting adam" "$ADAM_RUN_LOG" 2>/dev/null; do
+    sleep 1
+done
+log_info "Adam is up."
 
 # ── step 7: build EVE version 1 ───────────────────────────────────────────────
 
@@ -235,7 +271,7 @@ log_info "=== Step 7: Build EVE $EVE_VERSION_1 ==="
 if $SKIP_BUILD; then
     log_info "Skipping build (--skip-build)"
 else
-    BUILD_LOG="$WORK_DIR/build.log"
+    BUILD_LOG="$WORK_DIR/eve_build.log"
     log_info "Build output → $BUILD_LOG"
     pushd "$EVE_DIR" > /dev/null
     make pkg/pillar live > "$BUILD_LOG" 2>&1
