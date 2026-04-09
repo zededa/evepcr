@@ -27,7 +27,7 @@ done
 
 # ── configuration ─────────────────────────────────────────────────────────────
 # Two consecutive EVE release tags to test.
-EVE_VERSION_1="16.1.0"
+EVE_VERSION_1="14.5.3-rc4"
 EVE_VERSION_2="16.11.0"
 
 EVE_SERIAL="shahshah"
@@ -50,11 +50,9 @@ ROOTFS_DIR="$WORK_DIR/rootfs"
 MEASUREMENTS_DIR="$WORK_DIR/measurements"
 SSH_KEY="$WORK_DIR/eve_key"
 
-ROOTFS_V1="$ROOTFS_DIR/${EVE_VERSION_1}.img"
 ROOTFS_V2="$ROOTFS_DIR/${EVE_VERSION_2}.img"
 
 EVE_PREDICT="$REPO_ROOT/cmd/eve-predict/eve-predict"
-EVE_VALIDATE="$REPO_ROOT/cmd/eve-validate/eve-validate"
 EVE_ROOTFS_HASH="$REPO_ROOT/cmd/eve-rootfs-hash/eve-rootfs-hash"
 
 BASELINE_EVENTLOG="$MEASUREMENTS_DIR/baseline_eventlog"
@@ -151,7 +149,7 @@ if $PREDICT_ONLY; then
         fi
     done
     # Still need the Go tools built.
-    for tool_name in eve-predict eve-validate eve-rootfs-hash; do
+    for tool_name in eve-predict eve-rootfs-hash; do
         log_info "Building $tool_name..."
         (cd "$REPO_ROOT/cmd/$tool_name" && go build -o "$tool_name" .)
     done
@@ -171,7 +169,7 @@ require_tool ssh-keygen
 mkdir -p "$WORK_DIR" "$ROOTFS_DIR" "$MEASUREMENTS_DIR"
 
 # Build Go tools.
-for tool_name in eve-predict eve-validate eve-rootfs-hash; do
+for tool_name in eve-predict eve-rootfs-hash; do
     log_info "Building $tool_name..."
     (cd "$REPO_ROOT/cmd/$tool_name" && go build -o "$tool_name" .)
 done
@@ -196,16 +194,13 @@ popd > /dev/null
 
 log_info "=== Step 3: Download rootfs images ==="
 
-for version in "$EVE_VERSION_1" "$EVE_VERSION_2"; do
-    dest="$ROOTFS_DIR/${version}.img"
-    if [ ! -f "$dest" ]; then
-        url="${EVE_RELEASES_URL}/${version}/${ROOTFS_ASSET}"
-        log_info "Downloading rootfs for $version ..."
-        curl -fL --progress-bar -o "$dest" "$url"
-    else
-        log_info "Rootfs for $version already present."
-    fi
-done
+if [ ! -f "$ROOTFS_V2" ]; then
+    url="${EVE_RELEASES_URL}/${EVE_VERSION_2}/${ROOTFS_ASSET}"
+    log_info "Downloading rootfs for $EVE_VERSION_2 ..."
+    curl -fL --progress-bar -o "$ROOTFS_V2" "$url"
+else
+    log_info "Rootfs for $EVE_VERSION_2 already present."
+fi
 
 # ── step 4: switch EVE repo to version 1 ──────────────────────────────────────
 
