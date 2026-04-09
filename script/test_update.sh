@@ -346,7 +346,7 @@ log_info "Baseline PCR 14 (sha256): $BASELINE_PCR14"
     -rootfs  "$ROOTFS_V2" \
     -out     "$PREDICTIONS_GOB" \
     -compare "$UPDATED_PCRS" \
-    -verbose \
+    -algo    sha256 \
     "14:$BASELINE_PCR14"
 
 log_info "=== Test complete ==="
