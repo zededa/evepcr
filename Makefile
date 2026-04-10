@@ -5,8 +5,10 @@ ROOTFS_URL := https://github.com/zededa/tpm-event-verifier/releases/download/v0.
 
 build:
 	go build ./...
-	cd cmd/eve-predict && go build .
-	cd cmd/eve-validate && go build .
+	cd cmd/predict && go build .
+	cd cmd/validate-evtlog && go build .
+	cd cmd/gen-policy && go build .
+	cd cmd/rootfs-hash && go build .
 
 $(ROOTFS_IMG):
 	@echo "Downloading rootfs test fixture..."
@@ -17,4 +19,7 @@ test: $(ROOTFS_IMG)
 
 clean:
 	rm -f $(ROOTFS_IMG)
-	rm -f cmd/eve-predict/main cmd/eve-validate/main cmd/eve-validate/eve-validate
+	rm -f cmd/predict/main 		\
+	cmd/validate-evtlog/main 	\
+	cmd/gen-policy/main 		\
+	cmd/rootfs-hash/main
