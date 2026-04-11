@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Zededa, Inc.
 # SPDX-License-Identifier: Apache-2.0
 #
-# test_pcr_prediction.sh — end-to-end test for TPM PCR prediction across EVE OS updates.
+# test_pcr_prediction.sh - end-to-end test for TPM PCR prediction across EVE OS updates.
 #
 # Boots two consecutive EVE versions in QEMU (TPM enabled), captures TPM
 # measurements before and after an update, then validates that the prediction
@@ -13,6 +13,8 @@
 #
 
 set -euo pipefail
+
+exec > >(tee "${BASH_SOURCE[0]%.sh}.log") 2>&1
 
 # ── option parsing ─────────────────────────────────────────────────────────────
 SKIP_BUILD=false
@@ -358,7 +360,7 @@ fi # end of steps 1-13 (skipped by --predict)
 
 log_info "=== Step 14: Predict and validate post-update PCR values ==="
 
-# Extract PCR 14 (SHA-256) from the baseline — it must remain unchanged across
+# Extract PCR 14 (SHA-256) from the baseline - it must remain unchanged across
 # the update just like the firmware PCRs.
 BASELINE_PCR14=$(awk '
     /^[[:space:]]*sha256[[:space:]]*:/          { in_sha256=1; next }

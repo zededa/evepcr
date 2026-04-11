@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Zededa, Inc.
 # SPDX-License-Identifier: Apache-2.0
 #
-# build-rootfs-hashes.sh — for every EVE 14.x and 16.x LTS release tag,
+# build-rootfs-hashes.sh - for every EVE 14.x and 16.x LTS release tag,
 # download the rootfs image from GitHub releases, compute the PCR 13 hash
 # with eve-rootfs-hash, and write the results to a JSON file.
 #
@@ -17,6 +17,8 @@
 # Requirements: curl, git, jq, go (to build eve-rootfs-hash)
 #
 set -euo pipefail
+
+exec > >(tee "${BASH_SOURCE[0]%.sh}.log") 2>&1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
