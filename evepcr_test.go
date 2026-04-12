@@ -118,7 +118,7 @@ func TestPcrPrediction(t *testing.T) {
 	unsetFF := "0x" + strings.Repeat("F", 64)
 	unsetZero := "0x" + strings.Repeat("0", 64)
 
-	for i, expectedHex := range expectedPcrs.HashAlgo["sha256"] {
+	for i, expectedHex := range expectedPcrs["sha256"] {
 		if expectedHex == unsetFF || expectedHex == unsetZero {
 			continue
 		}
@@ -161,7 +161,7 @@ func TestPcrPrediction(t *testing.T) {
 func TestHashRootfsImage(t *testing.T) {
 	img, err := os.ReadFile("testdata/rootfs/rootfs.img")
 	if err != nil {
-		t.Fatalf("reading rootfs image: %v", err)
+		t.Skipf("rootfs image not available (%v), skipping", err)
 	}
 
 	got, err := HashRootfsImage(img)
@@ -182,7 +182,7 @@ func TestPredictPCRsWithRootfsHash(t *testing.T) {
 
 	img, err := os.ReadFile("testdata/rootfs/rootfs.img")
 	if err != nil {
-		t.Fatalf("reading rootfs image: %v", err)
+		t.Skipf("rootfs image not available (%v), skipping", err)
 	}
 
 	rootfsHash, err := HashRootfsImage(img)
@@ -250,6 +250,88 @@ func TestEventLogValidation(t *testing.T) {
 	}
 }
 
+// TestPredictPCRsFromBaseline_MatchesFullPredict checks that using
+// PredictPCRsFromBaseline produces the same results as PredictPCRs when
+// the same event log is passed as both src and dst.
+func TestPredictPCRsFromBaseline_MatchesFullPredict(t *testing.T) {
+	const eventlog = "testdata/src_version/14.5.1bcbf.bin"
+
+	got, err := PredictPCRsFromBaselineFile(eventlog, nil, nil)
+	if err != nil {
+		t.Fatalf("PredictPCRsFromBaselineFile: %v", err)
+	}
+
+	want, err := PredictPCRsFromFiles(eventlog, eventlog, nil)
+	if err != nil {
+		t.Fatalf("PredictPCRsFromFiles: %v", err)
+	}
+
+	for i := 0; i < maxPcrIndex; i++ {
+		if !pcrSetsEqual(got[i], want[i]) {
+			t.Errorf("PCR[%d]: baseline=%v full=%v", i, fmtPCRSet(got[i]), fmtPCRSet(want[i]))
+		}
+	}
+}
+
+// TestPredictPCRsFromBaseline_PCROverride checks that a value in pcrOverrides
+// replaces the predicted set for that index, while other PCRs are unaffected.
+func TestPredictPCRsFromBaseline_PCROverride(t *testing.T) {
+	const eventlog = "testdata/src_version/14.5.1bcbf.bin"
+
+	known14, _ := hex.DecodeString("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")
+	overrides := map[int][]byte{14: known14}
+
+	allPCRs, err := PredictPCRsFromBaselineFile(eventlog, nil, overrides)
+	if err != nil {
+		t.Fatalf("PredictPCRsFromBaselineFile: %v", err)
+	}
+
+	if len(allPCRs[14]) != 1 || !bytes.Equal(allPCRs[14][0], known14) {
+		t.Errorf("PCR[14]: got %v, want [%x]", fmtPCRSet(allPCRs[14]), known14)
+	}
+
+	// PCR 5 is driven by GPT variants and must not be affected by the override.
+	if len(allPCRs[5]) < 2 {
+		t.Errorf("PCR[5]: expected multiple variants, got %d", len(allPCRs[5]))
+	}
+}
+
+// TestPredictPCRsFromBaseline_RootfsHash checks that rootfsHash patches PCR 13
+// the same way it does in PredictPCRs.
+func TestPredictPCRsFromBaseline_RootfsHash(t *testing.T) {
+	const eventlog = "testdata/rootfs/tpm-event-log.bin"
+	const rootfsImg = "testdata/rootfs/rootfs.img"
+
+	img, err := os.ReadFile(rootfsImg)
+	if err != nil {
+		t.Skipf("rootfs image not available (%v), skipping", err)
+	}
+
+	rootfsHash, err := HashRootfsImage(img)
+	if err != nil {
+		t.Fatalf("HashRootfsImage: %v", err)
+	}
+
+	allPCRs, err := PredictPCRsFromBaselineFile(eventlog, rootfsHash, nil)
+	if err != nil {
+		t.Fatalf("PredictPCRsFromBaselineFile: %v", err)
+	}
+
+	const wantPCR13 = "69f9bae5df0d0976d5ed4c3f15a61556dd74585c158751f9339b126e654f4431"
+	wantBytes, _ := hex.DecodeString(wantPCR13)
+
+	found := false
+	for _, v := range allPCRs[13] {
+		if bytes.Equal(v, wantBytes) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("PCR[13]: want %s, got %v", wantPCR13, fmtPCRSet(allPCRs[13]))
+	}
+}
+
 // fmtPCRSet formats a [][]byte as hex strings for test output.
 func fmtPCRSet(set [][]byte) []string {
 	var out []string
@@ -257,4 +339,22 @@ func fmtPCRSet(set [][]byte) []string {
 		out = append(out, fmt.Sprintf("0x%X", v))
 	}
 	return out
+}
+
+// pcrSetsEqual returns true if a and b contain the same digests regardless of order.
+func pcrSetsEqual(a, b [][]byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	counts := make(map[string]int, len(a))
+	for _, v := range a {
+		counts[hex.EncodeToString(v)]++
+	}
+	for _, v := range b {
+		counts[hex.EncodeToString(v)]--
+		if counts[hex.EncodeToString(v)] < 0 {
+			return false
+		}
+	}
+	return true
 }

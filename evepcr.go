@@ -753,6 +753,86 @@ func PredictPCRs(srcLog, dstLog []byte, rootfsHash []byte) (map[int][][]byte, er
 	return result, nil
 }
 
+// PredictPCRsFromBaseline predicts PCR values using only the baseline event log,
+// without a new event log from the updated device. Use this when only known
+// values changed since the baseline was captured and the rest of the boot
+// sequence stayed the same.
+//
+// rootfsHash, if non-nil, patches the measurefs event so PCR 13 reflects the
+// new rootfs image content rather than the one measured at baseline.
+//
+// pcrOverrides maps PCR index to a final digest value that replaces the
+// baseline-predicted value for that index.
+func PredictPCRsFromBaseline(srcLog []byte, rootfsHash []byte, pcrOverrides map[int][]byte) (map[int][][]byte, error) {
+	src, err := attest.ParseEventLog(srcLog)
+	if err != nil {
+		return nil, fmt.Errorf("parsing event log: %w", err)
+	}
+
+	gptIdx, err := findGPTEventIndex(src)
+	if err != nil {
+		return nil, err
+	}
+
+	baselineGPTData, _, err := src.GetEventData(gptIdx)
+	if err != nil {
+		return nil, fmt.Errorf("getting GPT event: %w", err)
+	}
+	hasIMGB := hasPartitionInGPT(baselineGPTData, "IMGB")
+
+	originalSrc := src.Clone()
+
+	var allPCRSets [][][]byte
+	for _, v := range gptVariants {
+		if v.requireIMGB && !hasIMGB {
+			continue
+		}
+		pcrSet, err := predictVariant(originalSrc, src, src, gptIdx, v, rootfsHash)
+		if err != nil {
+			return nil, fmt.Errorf("variant prediction: %w", err)
+		}
+		allPCRSets = append(allPCRSets, pcrSet)
+	}
+
+	if len(allPCRSets) == 0 {
+		return nil, fmt.Errorf("no variants produced: IMGA partition not found in event log")
+	}
+
+	result := unionByIndex(allPCRSets...)
+
+	allZero := make([]byte, 32)
+	allFF := bytes.Repeat([]byte{0xFF}, 32)
+	for i := 0; i < maxPcrIndex; i++ {
+		hasValue := false
+		for _, v := range result[i] {
+			if len(v) > 0 {
+				hasValue = true
+				break
+			}
+		}
+		if !hasValue {
+			result[i] = [][]byte{allZero, allFF}
+		}
+	}
+
+	for idx, digest := range pcrOverrides {
+		if idx >= 0 && idx < maxPcrIndex {
+			result[idx] = [][]byte{digest}
+		}
+	}
+
+	return result, nil
+}
+
+// PredictPCRsFromBaselineFile is a file-based wrapper around PredictPCRsFromBaseline.
+func PredictPCRsFromBaselineFile(srcFile string, rootfsHash []byte, pcrOverrides map[int][]byte) (map[int][][]byte, error) {
+	srcBytes, err := os.ReadFile(srcFile)
+	if err != nil {
+		return nil, fmt.Errorf("reading event log: %w", err)
+	}
+	return PredictPCRsFromBaseline(srcBytes, rootfsHash, pcrOverrides)
+}
+
 // PredictPCRsFromFiles is a wrapper around PredictPCRs
 func PredictPCRsFromFiles(srcFile, dstFile string, rootfsHash []byte) (map[int][][]byte, error) {
 	srcBytes, err := os.ReadFile(srcFile)
