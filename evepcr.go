@@ -34,6 +34,9 @@ var defaultEvent = []byte{0x45, 0x46, 0x49, 0x20, 0x50, 0x41, 0x52, 0x54, 0x00, 
 // Default hash algorithm for PCRs
 var DefaultAlgo = attest.HashSHA256
 
+// HARDDRIVE_MEDIA_DEVICE_PATH node layout
+var hardDriveNodeHeader = []byte{0x04, 0x01, 0x2a, 0x00}
+
 // Event type string for EFI GPT event
 const (
 	defaultEventString    = "EV_EFI_GPT_EVENT"
@@ -63,6 +66,12 @@ const (
 	gptEntryNameSize = 72  // byte size of PartitionName (UTF-16LE, 36 chars)
 )
 
+// EVE hard-coded partition UUIDs (ASCII lowercase hyphenated form as used in GRUB commands).
+const (
+	eveIMGAPartUUID = "ad6871ee-31f9-4cf3-9e09-6f7a25c30052"
+	eveIMGBPartUUID = "ad6871ee-31f9-4cf3-9e09-6f7a25c30053"
+)
+
 // EVE gptprio partition attribute values for each boot state.
 // Layout of the Attributes uint64 (TCG / UEFI spec bits 48-56):
 //
@@ -75,6 +84,22 @@ const (
 	gptAttrInactive = uint64(0x0003000000000000) // priority=3, tries_left=0, successful=0
 	gptAttrZero     = uint64(0x0000000000000000) // not yet installed / no state
 )
+
+const (
+	hdPartNumOff = 4  // PartitionNumber (uint32 LE) offset within node
+	hdStartOff   = 8  // PartitionStart  (uint64 LE) offset
+	hdSizeOff    = 16 // PartitionSize   (uint64 LE) offset
+	hdGUIDOff    = 24 // Signature GUID  ([16]byte) offset
+	hdNodeSize   = 42 // total node size including 4-byte header
+)
+
+// evePartitionRef holds the EFI Hard Drive device path fields for one EVE image partition.
+type evePartitionRef struct {
+	number uint32
+	start  uint64
+	size   uint64
+	guid   [16]byte
+}
 
 type gptVariant struct {
 	imgaAttr    uint64
@@ -625,22 +650,22 @@ func findGrubStageOne(el *attest.EventLog) (int, error) {
 // It clones dst, patches its GPT event attributes, merges with src at gptIdx,
 // restores the original GRUB stage 1 hash, then predicts all PCR values.
 // If rootfsHash is non-nil it is used compute the value of PCR 13.
-func predictVariant(originalSrc, src, dst *attest.EventLog, gptIdx int, v gptVariant, rootfsHash []byte) ([][]byte, error) {
+func predictVariant(originalSrc, src, dst *attest.EventLog, gptIdx int, v gptVariant, rootfsHash []byte) ([][]byte, *attest.EventLog, error) {
 	// Clone dst and patch its GPT event for this variant.
 	dstClone := dst.Clone()
 	gptData, _, err := dstClone.GetEventData(gptIdx)
 	if err != nil {
-		return nil, fmt.Errorf("getting dst GPT event: %w", err)
+		return nil, nil, fmt.Errorf("getting dst GPT event: %w", err)
 	}
 	patched := patchGPTAttributes(gptData, v.imgaAttr, v.imgbAttr)
 	if err := dstClone.PatchEventData(gptIdx, patched); err != nil {
-		return nil, fmt.Errorf("patching GPT event: %w", err)
+		return nil, nil, fmt.Errorf("patching GPT event: %w", err)
 	}
 
 	// Merge: src events up to gptIdx, then patched dst events from gptIdx onward.
 	merged := src.Clone()
 	if err := merged.OverrideEvents(gptIdx, dstClone); err != nil {
-		return nil, fmt.Errorf("merging event logs: %w", err)
+		return nil, nil, fmt.Errorf("merging event logs: %w", err)
 	}
 
 	// Restore the GRUB stage 1 binary hash from the original source log.
@@ -666,7 +691,7 @@ func predictVariant(originalSrc, src, dst *attest.EventLog, gptIdx int, v gptVar
 				newDigests = append(newDigests, attest.NewDigest(alg, h.Sum(nil)))
 			}
 			if err := merged.SetEventData(measIdx, eventData, newDigests); err != nil {
-				return nil, fmt.Errorf("setting measurefs event: %w", err)
+				return nil, nil, fmt.Errorf("setting measurefs event: %w", err)
 			}
 		}
 	}
@@ -677,11 +702,11 @@ func predictVariant(originalSrc, src, dst *attest.EventLog, gptIdx int, v gptVar
 		pcr := attest.PCR{Index: i, DigestAlg: crypto.SHA256, Digest: make([]byte, 32)}
 		p, err := merged.Predict(pcr)
 		if err != nil {
-			return nil, fmt.Errorf("predicting PCR[%d]: %w", i, err)
+			return nil, nil, fmt.Errorf("predicting PCR[%d]: %w", i, err)
 		}
 		pcrs[i] = p
 	}
-	return pcrs, nil
+	return pcrs, merged, nil
 }
 
 // PredictPCRs predicts the full set of PCR values that a device will have after
@@ -691,44 +716,49 @@ func predictVariant(originalSrc, src, dst *attest.EventLog, gptIdx int, v gptVar
 // dstLog is the incoming event log bytes received from the device during attestation.
 //
 // If rootfsHash is non-nil it is used compute the value of PCR 13.
-// Returns the union of predicted PCR values across all synthesized states.
-func PredictPCRs(srcLog, dstLog []byte, rootfsHash []byte) (map[int][][]byte, error) {
+// Returns the union of predicted PCR values across all synthesized states, and
+// the serialized binary TCG event log of the first merged variant (for debugging).
+func PredictPCRs(srcLog, dstLog []byte, rootfsHash []byte) (map[int][][]byte, []byte, error) {
 	src, err := attest.ParseEventLog(srcLog)
 	if err != nil {
-		return nil, fmt.Errorf("parsing src event log: %w", err)
+		return nil, nil, fmt.Errorf("parsing src event log: %w", err)
 	}
 	dst, err := attest.ParseEventLog(dstLog)
 	if err != nil {
-		return nil, fmt.Errorf("parsing dst event log: %w", err)
+		return nil, nil, fmt.Errorf("parsing dst event log: %w", err)
 	}
 
 	gptIdx, err := findGPTEventIndex(src)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	dstGPTData, _, err := dst.GetEventData(gptIdx)
 	if err != nil {
-		return nil, fmt.Errorf("getting dst GPT event: %w", err)
+		return nil, nil, fmt.Errorf("getting dst GPT event: %w", err)
 	}
 	hasIMGB := hasPartitionInGPT(dstGPTData, "IMGB")
 
 	originalSrc := src.Clone()
 
 	var allPCRSets [][][]byte
+	var evtLogOut []byte
 	for _, v := range gptVariants {
 		if v.requireIMGB && !hasIMGB {
 			continue
 		}
-		pcrSet, err := predictVariant(originalSrc, src, dst, gptIdx, v, rootfsHash)
+		pcrSet, merged, err := predictVariant(originalSrc, src, dst, gptIdx, v, rootfsHash)
 		if err != nil {
-			return nil, fmt.Errorf("variant prediction: %w", err)
+			return nil, nil, fmt.Errorf("variant prediction: %w", err)
 		}
 		allPCRSets = append(allPCRSets, pcrSet)
+		if evtLogOut == nil {
+			evtLogOut, _ = merged.Serialize()
+		}
 	}
 
 	if len(allPCRSets) == 0 {
-		return nil, fmt.Errorf("no variants produced: IMGA partition not found in dst event log")
+		return nil, nil, fmt.Errorf("no variants produced: IMGA partition not found in dst event log")
 	}
 
 	result := unionByIndex(allPCRSets...)
@@ -750,52 +780,269 @@ func PredictPCRs(srcLog, dstLog []byte, rootfsHash []byte) (map[int][][]byte, er
 		}
 	}
 
-	return result, nil
+	return result, evtLogOut, nil
 }
 
-// PredictPCRsFromBaseline predicts PCR values using only the baseline event log,
-// without a new event log from the updated device. Use this when only known
-// values changed since the baseline was captured and the rest of the boot
-// sequence stayed the same.
+// extractEvePartitionRefs parses IMGA (gpt2) and IMGB (gpt3) partition entries
+// from the GPT event at gptIdx.
+func extractEvePartitionRefs(el *attest.EventLog, gptIdx int) (imga, imgb *evePartitionRef, err error) {
+	data, _, err := el.GetEventData(gptIdx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("getting GPT event data: %w", err)
+	}
+	entries, err := getPartitionsTableEntries(data)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parsing GPT entries: %w", err)
+	}
+	for _, e := range entries {
+		ref := &evePartitionRef{
+			start: e.Entry.StartingLBA,
+			size:  e.Entry.EndingLBA - e.Entry.StartingLBA + 1,
+			guid:  e.Entry.UniquePartitionGUID,
+		}
+		switch e.Name {
+		case "IMGA":
+			ref.number = 2
+			imga = ref
+		case "IMGB":
+			ref.number = 3
+			imgb = ref
+		}
+	}
+	return imga, imgb, nil
+}
+
+// detectBaselinePartition returns "gpt2" or "gpt3" by scanning EV_IPL events for
+// GRUB command strings that contain the active partition reference.
+func detectBaselinePartition(el *attest.EventLog) string {
+	for _, ev := range el.Events(DefaultAlgo) {
+		if ev.Type.String() == "EV_IPL" {
+			if bytes.Contains(ev.Data, []byte("hd0,gpt2")) {
+				return "gpt2"
+			}
+			if bytes.Contains(ev.Data, []byte("hd0,gpt3")) {
+				return "gpt3"
+			}
+		}
+	}
+	return "gpt2"
+}
+
+// detectEVEVersion finds the EVE version string embedded in GRUB EV_IPL events
+// (e.g. "16.11.0").
+func detectEVEVersion(el *attest.EventLog) string {
+	const prefix = "grub_cmd setparams Boot "
+	for _, ev := range el.Events(DefaultAlgo) {
+		if ev.Type.String() != "EV_IPL" {
+			continue
+		}
+		s := string(ev.Data)
+		if !strings.HasPrefix(s, prefix) {
+			continue
+		}
+		// Data: "grub_cmd setparams Boot <version>\0"
+		version := s[len(prefix):]
+		version = strings.TrimRight(version, "\x00")
+		if version != "" {
+			return version
+		}
+	}
+	return ""
+}
+
+// grubEVIPLDigestData returns the slice of eventData that GRUB actually extends
+// the PCR with.
+func grubEVIPLDigestData(data []byte) []byte {
+	const grubCmdPrefix = "grub_cmd "
+	const grubKernelCmdlinePrefix = "grub_kernel_cmdline "
+	switch {
+	case bytes.HasPrefix(data, []byte(grubCmdPrefix)):
+		return data[len(grubCmdPrefix):]
+	case bytes.HasPrefix(data, []byte(grubKernelCmdlinePrefix)):
+		payload := data[len(grubKernelCmdlinePrefix):]
+		if len(payload) > 0 && payload[len(payload)-1] == 0 {
+			payload = payload[:len(payload)-1]
+		}
+		return payload
+	}
+	return data
+}
+
+// cloneWithVersion returns a clone of el where EV_IPL event data that
+// srcVersion is updated to dstVersion.
+func cloneWithVersion(el *attest.EventLog, srcVersion, dstVersion string) *attest.EventLog {
+	srcBytes, dstBytes := []byte(srcVersion), []byte(dstVersion)
+	clone := el.Clone()
+	for i, ev := range el.Events(DefaultAlgo) {
+		if ev.Type.String() != "EV_IPL" {
+			continue
+		}
+		if !bytes.Contains(ev.Data, srcBytes) {
+			continue
+		}
+		newData := bytes.ReplaceAll(ev.Data, srcBytes, dstBytes)
+		_ = clone.SetEventData(i, newData, recomputeDigests(grubEVIPLDigestData(newData)))
+	}
+	return clone
+}
+
+// cloneWithAltPartition returns a clone of eventlog with all active-partition references
+// switched from the baseline partition to the other one (gpt2<->gpt3).
+func cloneWithAltPartition(el *attest.EventLog, gptIdx int) (*attest.EventLog, error) {
+	imga, imgb, err := extractEvePartitionRefs(el, gptIdx)
+	if err != nil {
+		return nil, fmt.Errorf("extracting partition refs: %w", err)
+	}
+	if imga == nil || imgb == nil {
+		return nil, fmt.Errorf("IMGA or IMGB not found in GPT event")
+	}
+
+	basePart := detectBaselinePartition(el)
+	var srcTag, dstTag string
+	var srcUUID, dstUUID string
+	var srcRef, dstRef *evePartitionRef
+	if basePart == "gpt2" {
+		srcTag, dstTag = "gpt2", "gpt3"
+		srcUUID, dstUUID = eveIMGAPartUUID, eveIMGBPartUUID
+		srcRef, dstRef = imga, imgb
+	} else {
+		srcTag, dstTag = "gpt3", "gpt2"
+		srcUUID, dstUUID = eveIMGBPartUUID, eveIMGAPartUUID
+		srcRef, dstRef = imgb, imga
+	}
+	srcBytes, dstBytes := []byte(srcTag), []byte(dstTag)
+	srcUUIDBytes, dstUUIDBytes := []byte(srcUUID), []byte(dstUUID)
+
+	clone := el.Clone()
+	for i, ev := range el.Events(DefaultAlgo) {
+		switch ev.Type.String() {
+		case "EV_IPL":
+			hasTag := bytes.Contains(ev.Data, srcBytes)
+			hasUUID := bytes.Contains(ev.Data, srcUUIDBytes)
+			if !hasTag && !hasUUID {
+				continue
+			}
+			newData := ev.Data
+			if hasTag {
+				newData = bytes.ReplaceAll(newData, srcBytes, dstBytes)
+			}
+			if hasUUID {
+				newData = bytes.ReplaceAll(newData, srcUUIDBytes, dstUUIDBytes)
+			}
+			digestData := grubEVIPLDigestData(newData)
+			_ = clone.SetEventData(i, newData, recomputeDigests(digestData))
+
+		case "EV_EFI_BOOT_SERVICES_APPLICATION":
+			if !bytes.Contains(ev.Data, hardDriveNodeHeader) {
+				continue
+			}
+			newData := make([]byte, len(ev.Data))
+			copy(newData, ev.Data)
+			patched := false
+			for off := 0; off <= len(newData)-hdNodeSize; off++ {
+				if bytes.Equal(newData[off:off+4], hardDriveNodeHeader) {
+					if patchHardDriveNode(newData, off, srcRef, dstRef) {
+						patched = true
+					}
+					off += hdNodeSize - 1
+				}
+			}
+			if patched {
+				_ = clone.SetEventData(i, newData, recomputeDigests(newData))
+			}
+		}
+	}
+	return clone, nil
+}
+
+// patchHardDriveNode overwrites the PartitionNumber, PartitionStart, PartitionSize,
+// and Signature GUID fields in a HARDDRIVE_MEDIA_DEVICE_PATH node at buf[off:].
+// Returns true if the node referenced srcRef and was patched.
+func patchHardDriveNode(buf []byte, off int, srcRef, dstRef *evePartitionRef) bool {
+	if off+hdNodeSize > len(buf) {
+		return false
+	}
+	if binary.LittleEndian.Uint32(buf[off+hdPartNumOff:]) != srcRef.number {
+		return false
+	}
+	binary.LittleEndian.PutUint32(buf[off+hdPartNumOff:], dstRef.number)
+	binary.LittleEndian.PutUint64(buf[off+hdStartOff:], dstRef.start)
+	binary.LittleEndian.PutUint64(buf[off+hdSizeOff:], dstRef.size)
+	copy(buf[off+hdGUIDOff:], dstRef.guid[:])
+	return true
+}
+
+// PredictPCRsFromBaseline predicts PCR values using only the baseline event log.
 //
 // rootfsHash, if non-nil, patches the measurefs event so PCR 13 reflects the
 // new rootfs image content rather than the one measured at baseline.
 //
 // pcrOverrides maps PCR index to a final digest value that replaces the
 // baseline-predicted value for that index.
-func PredictPCRsFromBaseline(srcLog []byte, rootfsHash []byte, pcrOverrides map[int][]byte) (map[int][][]byte, error) {
+func PredictPCRsFromBaseline(srcLog []byte, rootfsHash []byte, eveVersion string, pcrOverrides map[int][]byte) (map[int][][]byte, []byte, error) {
 	src, err := attest.ParseEventLog(srcLog)
 	if err != nil {
-		return nil, fmt.Errorf("parsing event log: %w", err)
+		return nil, nil, fmt.Errorf("parsing event log: %w", err)
+	}
+
+	// If a target EVE version is given, patch version strings in the baseline
+	// event log before running predictions.
+	if eveVersion != "" {
+		if srcVersion := detectEVEVersion(src); srcVersion != "" && srcVersion != eveVersion {
+			src = cloneWithVersion(src, srcVersion, eveVersion)
+		}
 	}
 
 	gptIdx, err := findGPTEventIndex(src)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	baselineGPTData, _, err := src.GetEventData(gptIdx)
 	if err != nil {
-		return nil, fmt.Errorf("getting GPT event: %w", err)
+		return nil, nil, fmt.Errorf("getting GPT event: %w", err)
 	}
 	hasIMGB := hasPartitionInGPT(baselineGPTData, "IMGB")
 
 	originalSrc := src.Clone()
 
 	var allPCRSets [][][]byte
+	var baseEventLog, altEventLog []byte
+
 	for _, v := range gptVariants {
 		if v.requireIMGB && !hasIMGB {
 			continue
 		}
-		pcrSet, err := predictVariant(originalSrc, src, src, gptIdx, v, rootfsHash)
+		pcrSet, merged, err := predictVariant(originalSrc, src, src, gptIdx, v, rootfsHash)
 		if err != nil {
-			return nil, fmt.Errorf("variant prediction: %w", err)
+			return nil, nil, fmt.Errorf("variant prediction: %w", err)
 		}
 		allPCRSets = append(allPCRSets, pcrSet)
+		if baseEventLog == nil {
+			baseEventLog, _ = merged.Serialize()
+		}
+	}
+
+	// Generate variants for the other EVE partition (gpt2<->gpt3).
+	if altSrc, err := cloneWithAltPartition(src, gptIdx); err == nil {
+		altOriginal := altSrc.Clone()
+		for _, v := range gptVariants {
+			if v.requireIMGB && !hasIMGB {
+				continue
+			}
+			pcrSet, merged, err := predictVariant(altOriginal, altSrc, altSrc, gptIdx, v, rootfsHash)
+			if err != nil {
+				return nil, nil, fmt.Errorf("alt-partition variant prediction: %w", err)
+			}
+			allPCRSets = append(allPCRSets, pcrSet)
+			if altEventLog == nil {
+				altEventLog, _ = merged.Serialize()
+			}
+		}
 	}
 
 	if len(allPCRSets) == 0 {
-		return nil, fmt.Errorf("no variants produced: IMGA partition not found in event log")
+		return nil, nil, fmt.Errorf("no variants produced: IMGA partition not found in event log")
 	}
 
 	result := unionByIndex(allPCRSets...)
@@ -821,27 +1068,32 @@ func PredictPCRsFromBaseline(srcLog []byte, rootfsHash []byte, pcrOverrides map[
 		}
 	}
 
-	return result, nil
+	mergedLog := altEventLog
+	if mergedLog == nil {
+		mergedLog = baseEventLog
+	}
+
+	return result, mergedLog, nil
 }
 
 // PredictPCRsFromBaselineFile is a file-based wrapper around PredictPCRsFromBaseline.
-func PredictPCRsFromBaselineFile(srcFile string, rootfsHash []byte, pcrOverrides map[int][]byte) (map[int][][]byte, error) {
+func PredictPCRsFromBaselineFile(srcFile string, rootfsHash []byte, eveVersion string, pcrOverrides map[int][]byte) (map[int][][]byte, []byte, error) {
 	srcBytes, err := os.ReadFile(srcFile)
 	if err != nil {
-		return nil, fmt.Errorf("reading event log: %w", err)
+		return nil, nil, fmt.Errorf("reading event log: %w", err)
 	}
-	return PredictPCRsFromBaseline(srcBytes, rootfsHash, pcrOverrides)
+	return PredictPCRsFromBaseline(srcBytes, rootfsHash, eveVersion, pcrOverrides)
 }
 
 // PredictPCRsFromFiles is a wrapper around PredictPCRs
-func PredictPCRsFromFiles(srcFile, dstFile string, rootfsHash []byte) (map[int][][]byte, error) {
+func PredictPCRsFromFiles(srcFile, dstFile string, rootfsHash []byte) (map[int][][]byte, []byte, error) {
 	srcBytes, err := os.ReadFile(srcFile)
 	if err != nil {
-		return nil, fmt.Errorf("reading src event log: %w", err)
+		return nil, nil, fmt.Errorf("reading src event log: %w", err)
 	}
 	dstBytes, err := os.ReadFile(dstFile)
 	if err != nil {
-		return nil, fmt.Errorf("reading dst event log: %w", err)
+		return nil, nil, fmt.Errorf("reading dst event log: %w", err)
 	}
 	return PredictPCRs(srcBytes, dstBytes, rootfsHash)
 }
@@ -1008,4 +1260,18 @@ func findMeasurefsEventIndex(el *attest.EventLog) (int, error) {
 		}
 	}
 	return -1, fmt.Errorf("measurefs EV_IPL event not found in PCR %d", pcrMeasurefs)
+}
+
+// recomputeDigests hashes data with all supported TPM algorithms.
+func recomputeDigests(data []byte) []attest.Digest {
+	var out []attest.Digest
+	for _, alg := range []crypto.Hash{crypto.SHA1, crypto.SHA256, crypto.SHA384, crypto.SHA512} {
+		if !alg.Available() {
+			continue
+		}
+		h := alg.New()
+		h.Write(data)
+		out = append(out, attest.NewDigest(alg, h.Sum(nil)))
+	}
+	return out
 }

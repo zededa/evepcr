@@ -80,7 +80,7 @@ func TestPcrPredictionFull(t *testing.T) {
 	// Use a dst log that has both IMGA and IMGB so all 8 partition state
 	// variants are synthesized. binary_bios_measurements_IMGB_active fits
 	// because it was captured from a fully updated device with both partitions.
-	allPCRs, err := PredictPCRsFromFiles("testdata/src_version/14.5.1bcbf.bin",
+	allPCRs, _, err := PredictPCRsFromFiles("testdata/src_version/14.5.1bcbf.bin",
 		"testdata/dst_version/binary_bios_measurements_IMGB_active", nil)
 	if err != nil {
 		t.Fatalf("PredictPCRs failed: %v", err)
@@ -104,7 +104,7 @@ func TestPcrPredictionFull(t *testing.T) {
 
 func TestPcrPrediction(t *testing.T) {
 	// dst has only IMGA (no IMGB) → 2 variants: IMGA-active and IMGA-updating.
-	allPCRs, err := PredictPCRsFromFiles("testdata/src_version/14.5.1bcbf.bin",
+	allPCRs, _, err := PredictPCRsFromFiles("testdata/src_version/14.5.1bcbf.bin",
 		"testdata/dst_version/14.5_stable.bin", nil)
 	if err != nil {
 		t.Fatalf("PredictPCRs failed: %v", err)
@@ -190,7 +190,7 @@ func TestPredictPCRsWithRootfsHash(t *testing.T) {
 		t.Fatalf("HashRootfsImage: %v", err)
 	}
 
-	allPCRs, err := PredictPCRsFromFiles(eventLog, eventLog, rootfsHash)
+	allPCRs, _, err := PredictPCRsFromFiles(eventLog, eventLog, rootfsHash)
 	if err != nil {
 		t.Fatalf("PredictPCRs: %v", err)
 	}
@@ -256,12 +256,12 @@ func TestEventLogValidation(t *testing.T) {
 func TestPredictPCRsFromBaseline_MatchesFullPredict(t *testing.T) {
 	const eventlog = "testdata/src_version/14.5.1bcbf.bin"
 
-	got, err := PredictPCRsFromBaselineFile(eventlog, nil, nil)
+	got, _, err := PredictPCRsFromBaselineFile(eventlog, nil, "", nil)
 	if err != nil {
 		t.Fatalf("PredictPCRsFromBaselineFile: %v", err)
 	}
 
-	want, err := PredictPCRsFromFiles(eventlog, eventlog, nil)
+	want, _, err := PredictPCRsFromFiles(eventlog, eventlog, nil)
 	if err != nil {
 		t.Fatalf("PredictPCRsFromFiles: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestPredictPCRsFromBaseline_PCROverride(t *testing.T) {
 	known14, _ := hex.DecodeString("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")
 	overrides := map[int][]byte{14: known14}
 
-	allPCRs, err := PredictPCRsFromBaselineFile(eventlog, nil, overrides)
+	allPCRs, _, err := PredictPCRsFromBaselineFile(eventlog, nil, "", overrides)
 	if err != nil {
 		t.Fatalf("PredictPCRsFromBaselineFile: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestPredictPCRsFromBaseline_RootfsHash(t *testing.T) {
 		t.Fatalf("HashRootfsImage: %v", err)
 	}
 
-	allPCRs, err := PredictPCRsFromBaselineFile(eventlog, rootfsHash, nil)
+	allPCRs, _, err := PredictPCRsFromBaselineFile(eventlog, rootfsHash, "", nil)
 	if err != nil {
 		t.Fatalf("PredictPCRsFromBaselineFile: %v", err)
 	}
