@@ -17,17 +17,27 @@ import (
 )
 
 func main() {
-	oldEventLog := flag.String("old", "", "Path to the source (currently running) event log file")
-	newEventLog := flag.String("new", "", "Path to the destination (new version) event log file (any partition state)")
-	rootfsImage := flag.String("rootfs", "", "Path to the destination squashfs rootfs image; when set PCR 13 is predicted from its content")
-	outFile := flag.String("out", "predicted_pcrs.gob", "Output file to serialize PCR values")
+	oldEventLog := flag.String("old", "", "baseline event log file")
+	newEventLog := flag.String("new", "", "updated event log from the device; omit to predict from baseline only")
+	rootfsImage := flag.String("rootfs", "", "squashfs rootfs image; when set PCR 13 is predicted from its content")
+	eveVersion := flag.String("version", "", "target EVE version string (e.g. 16.11.0-kvm-amd64); improves PCR 8 accuracy in baseline-only mode")
+	outFile := flag.String("out", "predicted_pcrs.gob", "output file for serialized PCR predictions")
+	dumpEventLog := flag.String("dump-eventlog", "", "write the predicted event log to this file")
 	compareFile := flag.String("compare", "", "PCR YAML file with actual values to compare against predictions; exits 1 on mismatch")
-	algo := flag.String("algo", "sha256", "Hash algorithm to use when comparing PCR values (sha1, sha256, sha384, sha512)")
-	verbose := flag.Bool("verbose", false, "Enable verbose output")
+	algo := flag.String("algo", "sha256", "hash algorithm for comparisons (sha1, sha256, sha384, sha512)")
+	verbose := flag.Bool("verbose", false, "print predicted PCR values")
 
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s -old <eventlog> [-new <eventlog>] [-rootfs <img>] [flags] [pcr-index:hexdigest ...]\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Positional args supply known PCR values.\n")
+		fmt.Fprintf(os.Stderr, "  With -new: values are added to the predicted set (e.g. user-space PCR 14).\n")
+		fmt.Fprintf(os.Stderr, "  Without -new: values replace the baseline prediction for that index.\n\n")
+		flag.PrintDefaults()
+	}
 	flag.Parse()
-	if *oldEventLog == "" || *newEventLog == "" {
-		fmt.Println("Flags -old and -new are required.")
+
+	if *oldEventLog == "" {
+		fmt.Println("error: -old is required")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -49,39 +59,37 @@ func main() {
 		}
 	}
 
-	allPCRs, err := epcr.PredictPCRsFromFiles(*oldEventLog, *newEventLog, rootfsHash)
+	pcrArgs, err := parsePCRArgs(flag.Args())
 	if err != nil {
-		fmt.Printf("PredictPCRs failed: %v\n", err)
+		fmt.Printf("%v\n", err)
 		os.Exit(1)
 	}
 
-	// Merge any extra PCR values supplied as positional args (<index>:<hexstring>).
-	for _, arg := range flag.Args() {
-		parts := strings.SplitN(arg, ":", 2)
-		if len(parts) != 2 {
-			fmt.Fprintf(os.Stderr, "invalid PCR argument %q: expected <index>:<hexstring>\n", arg)
-			os.Exit(1)
-		}
-		idx, err := strconv.Atoi(parts[0])
-		if err != nil || idx < 0 || idx >= 24 {
-			fmt.Fprintf(os.Stderr, "invalid PCR index in %q: must be 0-23\n", arg)
-			os.Exit(1)
-		}
-		val, err := hex.DecodeString(parts[1])
+	var allPCRs map[int][][]byte
+	var mergedLog []byte
+	if *newEventLog != "" {
+		allPCRs, mergedLog, err = epcr.PredictPCRsFromFiles(*oldEventLog, *newEventLog, rootfsHash)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "invalid hex value in %q: %v\n", arg, err)
+			fmt.Printf("PredictPCRs failed: %v\n", err)
 			os.Exit(1)
 		}
-
-		found := false
-		for _, existing := range allPCRs[idx] {
-			if string(existing) == string(val) {
-				found = true
-				break
+		for idx, val := range pcrArgs {
+			found := false
+			for _, existing := range allPCRs[idx] {
+				if bytes.Equal(existing, val) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				allPCRs[idx] = append(allPCRs[idx], val)
 			}
 		}
-		if !found {
-			allPCRs[idx] = append(allPCRs[idx], val)
+	} else {
+		allPCRs, mergedLog, err = epcr.PredictPCRsFromBaselineFile(*oldEventLog, rootfsHash, *eveVersion, pcrArgs)
+		if err != nil {
+			fmt.Printf("PredictPCRsFromBaseline failed: %v\n", err)
+			os.Exit(1)
 		}
 	}
 
@@ -105,6 +113,20 @@ func main() {
 	if err := epcr.SerializePcrsToFile(*outFile, allPCRs); err != nil {
 		fmt.Printf("SerializePcrsToFile failed: %v\n", err)
 		os.Exit(1)
+	}
+
+	if *dumpEventLog != "" {
+		if len(mergedLog) == 0 {
+			fmt.Fprintf(os.Stderr, "dump-eventlog: no merged event log available\n")
+			os.Exit(1)
+		}
+		if err := os.WriteFile(*dumpEventLog, mergedLog, 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "dump-eventlog: %v\n", err)
+			os.Exit(1)
+		}
+		if *verbose {
+			fmt.Printf("predicted event log written to %s\n", *dumpEventLog)
+		}
 	}
 
 	if *compareFile != "" {
@@ -157,4 +179,24 @@ func main() {
 			os.Exit(1)
 		}
 	}
+}
+
+func parsePCRArgs(args []string) (map[int][]byte, error) {
+	out := make(map[int][]byte, len(args))
+	for _, arg := range args {
+		parts := strings.SplitN(arg, ":", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid PCR argument %q: expected <index>:<hexdigest>", arg)
+		}
+		idx, err := strconv.Atoi(parts[0])
+		if err != nil || idx < 0 || idx >= 24 {
+			return nil, fmt.Errorf("invalid PCR index in %q: must be 0-23", arg)
+		}
+		val, err := hex.DecodeString(parts[1])
+		if err != nil {
+			return nil, fmt.Errorf("invalid hex value in %q: %v", arg, err)
+		}
+		out[idx] = val
+	}
+	return out, nil
 }

@@ -11,6 +11,7 @@ import (
 	"crypto"
 	"crypto/x509"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"flag"
@@ -48,6 +49,7 @@ func main() {
 	counterStr := flag.String("counter-index", "0", "NV monotonic counter handle; 0 disables rollback protection")
 	algo := flag.String("algo", "sha256", "PCR hash algorithm: sha1, sha256, sha384, sha512")
 	secretStr := flag.String("secret", "test-secret", "secret to seal on first run")
+	verbose := flag.Bool("verbose", false, "print actual PCR values from the TPM before unsealing")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [-policy <file> | -local] -pub <key.pem> -nv-index <handle> [flags] [pcr-index ...]\n\n", os.Args[0])
@@ -136,16 +138,13 @@ func main() {
 	if existErr != nil {
 		sealPath(nvIndex, counterIndex, b.AuthDigest, []byte(*secretStr))
 	} else {
-		unsealPath(nvIndex, counterIndex, pub, b.Policies, sel)
+		unsealPath(nvIndex, counterIndex, pub, b.Policies, sel, *verbose)
 	}
 }
 
 // sealPath creates the NV index and seals the secret under authDigest.
 func sealPath(nvIndex, counterIndex uint32, authDigest, secret []byte) {
 	log.Printf("NV index 0x%x not found - sealing", nvIndex)
-	if counterIndex != 0 {
-		log.Printf("counter 0x%x: will be defined before sealing", counterIndex)
-	}
 
 	if counterIndex != 0 {
 		val, err := tpmea.DefineMonotonicCounter(counterIndex)
@@ -163,7 +162,7 @@ func sealPath(nvIndex, counterIndex uint32, authDigest, secret []byte) {
 
 // unsealPath reads the current counter value, increments it if needed,
 // then tries each policy until one unseals successfully.
-func unsealPath(nvIndex, counterIndex uint32, pub crypto.PublicKey, policies []policyEntry, sel tpmea.PCRSelection) {
+func unsealPath(nvIndex, counterIndex uint32, pub crypto.PublicKey, policies []policyEntry, sel tpmea.PCRSelection, verbose bool) {
 	log.Printf("NV index 0x%x found - trying %d polic(ies)", nvIndex, len(policies))
 
 	currentCounter := uint64(0)
@@ -191,6 +190,10 @@ func unsealPath(nvIndex, counterIndex uint32, pub crypto.PublicKey, policies []p
 		} else {
 			currentCounter = val
 		}
+	}
+
+	if verbose {
+		logPCRs(sel)
 	}
 
 	for i, entry := range policies {
@@ -223,6 +226,18 @@ func unsealPath(nvIndex, counterIndex uint32, pub crypto.PublicKey, policies []p
 	}
 
 	log.Fatalf("all %d policies failed to unseal", len(policies))
+}
+
+func logPCRs(sel tpmea.PCRSelection) {
+	pcrs, err := tpmea.ReadPCRs(sel.Indexes, sel.Algo)
+	if err != nil {
+		log.Printf("debug: could not read PCRs from TPM: %v", err)
+		return
+	}
+	log.Printf("actual PCR values (%d indexes):", len(pcrs.Pcrs))
+	for _, p := range pcrs.Pcrs {
+		log.Printf("  PCR[%2d] = %s", p.Index, hex.EncodeToString(p.Digest))
+	}
 }
 
 func parsePCRIndexes(args []string) ([]int, error) {
