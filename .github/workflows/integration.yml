@@ -1,0 +1,132 @@
+name: Integration tests
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pcr-prediction:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: '1.22'
+
+      - name: Check KVM availability
+        id: kvm
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::KVM not available, skipping integration test"
+          fi
+
+      - name: Install dependencies
+        if: steps.kvm.outputs.available == 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 qemu-utils swtpm openssh-client python3 curl jq
+
+      - name: Run PCR prediction test
+        if: steps.kvm.outputs.available == 'true'
+        run: bash script/test_pcr_prediction.sh
+
+      - name: Upload logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pcr-prediction-logs
+          path: |
+            script/test_pcr_prediction.log
+            out/
+
+  tpmea:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: '1.22'
+
+      - name: Check KVM availability
+        id: kvm
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::KVM not available, skipping integration test"
+          fi
+
+      - name: Install dependencies
+        if: steps.kvm.outputs.available == 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 qemu-utils swtpm openssh-client python3 curl jq
+
+      - name: Run TPM EA test
+        if: steps.kvm.outputs.available == 'true'
+        run: bash script/test_tpmea.sh
+
+      - name: Upload logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tpmea-logs
+          path: |
+            script/test_tpmea.log
+            out/
+
+  tpmea-baseline:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: '1.22'
+
+      - name: Check KVM availability
+        id: kvm
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::KVM not available, skipping integration test"
+          fi
+
+      - name: Install dependencies
+        if: steps.kvm.outputs.available == 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 qemu-utils swtpm openssh-client python3 curl jq
+
+      - name: Run TPM EA baseline test
+        if: steps.kvm.outputs.available == 'true'
+        run: bash script/test_tpmea_baseline.sh
+
+      - name: Upload logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tpmea-baseline-logs
+          path: |
+            script/test_tpmea_baseline.log
+            out/
