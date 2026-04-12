@@ -406,6 +406,32 @@ log_info "QEMU started (PID $QEMU_PID)"
 wait_for_ssh
 wait_for_onboard
 
+# ── step 8a: initialize other partition if empty ──────────────────────────────
+
+log_step "=== Step 8a: Initialize other partition if empty ==="
+
+_CURPART=$(ssh_cmd "eve exec pillar zboot curpart")
+_OTHERPART=$([ "$_CURPART" = "IMGA" ] && echo "IMGB" || echo "IMGA")
+_CURPART_DEV=$(ssh_cmd "lsblk -rno NAME,PARTLABEL | awk -v p='$_CURPART' '\$2==p {print \"/dev/\" \$1}'")
+_OTHER_PARTDEV=$(ssh_cmd "lsblk -rno NAME,PARTLABEL | awk -v p='$_OTHERPART' '\$2==p {print \"/dev/\" \$1}'")
+log_info "Current: $_CURPART ($_CURPART_DEV)  other: $_OTHERPART ($_OTHER_PARTDEV)"
+
+if [ -z "$_OTHER_PARTDEV" ]; then
+    log_info "$_OTHERPART device not found in GPT - skipping"
+else
+    # squashfs magic 0x73717368 stored little-endian on disk = bytes 68 73 71 73
+    _MAGIC=$(ssh_cmd "dd if=$_OTHER_PARTDEV bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n'" 2>/dev/null || echo "")
+    if [ "$_MAGIC" = "68737173" ]; then
+        log_info "$_OTHERPART already has a valid squashfs image - skipping"
+    else
+        log_info "$_OTHERPART has no valid squashfs (magic=$_MAGIC) - copying $_CURPART image ..."
+        ssh_cmd "dd if=$_CURPART_DEV of=$_OTHER_PARTDEV bs=4M && sync"
+        ssh_cmd "eve exec pillar zboot set_partstate $_OTHERPART unused" 2>/dev/null || true
+        log_info "$_OTHERPART initialized and set to unused."
+    fi
+fi
+unset _CURPART _OTHERPART _CURPART_DEV _OTHER_PARTDEV _MAGIC
+
 # ── step 9: reboot after onboarding ───────────────────────────────────────────
 
 log_step "=== Step 9: Reboot after onboarding ==="
@@ -539,7 +565,8 @@ log_info "Baseline PCR 14 (sha256): $BASELINE_PCR14"
     -old    "$BASELINE_EVENTLOG" \
     -new    "$UPDATED_EVENTLOG" \
     -rootfs "$ROOTFS_V2" \
-    -out    "$PREDICTIONS_GOB" \
+    -out           "$PREDICTIONS_GOB" \
+    -dump-eventlog "$MEASUREMENTS_DIR/predicted_evlog" \
     -algo   sha256 \
     "14:$BASELINE_PCR14"
 
