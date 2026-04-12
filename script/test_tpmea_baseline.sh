@@ -89,7 +89,7 @@ SWTPM_SRV_SOCK="$SWTPM_DIR/tpm.srv.sock"
 SWTPM_CTRL_SOCK="$SWTPM_DIR/tpm.ctrl.sock"
 
 ADAM_REPO_URL="https://github.com/shjala/adam.git"
-ADAM_BRANCH="MinimalistAdam"
+ADAM_COMMIT="4ea055d0a45558d1b72cd6706437ad78306d8e16"
 ADAM_DIR="$WORK_DIR/adam"
 ADAM_BUILD_LOG="$WORK_DIR/adam_build.log"
 ADAM_RUN_LOG="$WORK_DIR/adam_run.log"
@@ -344,7 +344,7 @@ else
 fi
 
 pushd "$ADAM_DIR" > /dev/null
-git checkout "$ADAM_BRANCH"
+git checkout "$ADAM_COMMIT"
 popd > /dev/null
 
 ADAM_BIN="$ADAM_DIR/bin/adam"
@@ -358,7 +358,7 @@ if [ -f "$ADAM_BIN" ] && [ -f "$ADAM_CERTS" ]; then
     ADAM_PID=$!
     popd > /dev/null
 else
-    log_info "Building Adam (branch $ADAM_BRANCH) -> $ADAM_BUILD_LOG"
+    log_info "Building Adam (commit $ADAM_COMMIT) -> $ADAM_BUILD_LOG"
     pushd "$ADAM_DIR" > /dev/null
     make > "$ADAM_BUILD_LOG" 2>&1
     popd > /dev/null
