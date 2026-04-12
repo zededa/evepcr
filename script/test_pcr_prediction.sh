@@ -50,7 +50,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 EVE_DIR="$WORK_DIR/eve"
 ROOTFS_DIR="$WORK_DIR/rootfs"
 MEASUREMENTS_DIR="$WORK_DIR/measurements"
-SSH_KEY="$WORK_DIR/eve_key"
+SSH_KEY="$WORK_DIR/eve_ssh_key"
 
 ROOTFS_V2="$ROOTFS_DIR/${EVE_VERSION_2}.img"
 

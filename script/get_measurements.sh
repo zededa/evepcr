@@ -4,11 +4,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Generate random SSH key
-ssh-keygen -t ed25519 -f /tmp/eve_key -N "" -q
+ssh-keygen -t ed25519 -f /tmp/eve_ssh_key -N "" -q
 
 # Add public key to authorized_keys
 mkdir -p conf
-cp /tmp/eve_key.pub conf/authorized_keys
+cp /tmp/eve_ssh_key.pub conf/authorized_keys
 
 # Build system
 make clean pkgs live
@@ -20,7 +20,7 @@ QEMU_PID=$!
 # Wait for system to boot
 sleep 30
 
-SSH_CMD="ssh -i /tmp/eve_key -p 2222 -o StrictHostKeyChecking=no root@localhost"
+SSH_CMD="ssh -i /tmp/eve_ssh_key -p 2222 -o StrictHostKeyChecking=no root@localhost"
 
 # get the current and other partition
 CURPART=$($SSH_CMD "eve exec pillar zboot curpart")

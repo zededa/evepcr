@@ -130,7 +130,7 @@ func ValidatePcrFive(oldEventLog, currEventLog string) error {
 			return fmt.Errorf("partition %d ending LBA mismatch: old %d, new %d", i,
 				oldEntry.EndingLBA, newEntry.EndingLBA)
 		}
-		// Skip Attribute check for IMGA/IMGB — varies by partition state.
+		// Skip Attribute check for IMGA/IMGB - varies by partition state.
 		if oldName != "IMGA" && oldName != "IMGB" {
 			if oldEntry.Attributes != newEntry.Attributes {
 				return fmt.Errorf("partition %d attributes mismatch: old %d, new %d", i,
