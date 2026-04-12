@@ -182,6 +182,78 @@ func (e *EventLog) Clone() *EventLog {
 	return &out
 }
 
+// Serialize encodes the EventLog back to its binary TCG2 on-disk format.
+func (e *EventLog) Serialize() ([]byte, error) {
+	if e.specIDEvent == nil {
+		return nil, errors.New("cannot serialize TPM 1.2 (SHA1-only) event logs")
+	}
+
+	algToID := func(h crypto.Hash) (uint16, error) {
+		switch h {
+		case crypto.SHA1:
+			return uint16(HashSHA1), nil
+		case crypto.SHA256:
+			return uint16(HashSHA256), nil
+		case crypto.SHA384:
+			return uint16(HashSHA384), nil
+		case crypto.SHA512:
+			return uint16(HashSHA512), nil
+		default:
+			return 0, fmt.Errorf("unsupported hash algorithm %v", h)
+		}
+	}
+
+	var buf bytes.Buffer
+
+	spec := e.specIDEvent
+	specHdr := specIDEventHeader{
+		Signature:     wantSignature,
+		PlatformClass: spec.platformClass,
+		VersionMinor:  spec.versionMinor,
+		VersionMajor:  spec.versionMajor,
+		Errata:        spec.errata,
+		UintnSize:     spec.uintnSize,
+		NumAlgs:       uint32(len(spec.algs)),
+	}
+	var specData bytes.Buffer
+	binary.Write(&specData, binary.LittleEndian, specHdr)
+	for _, alg := range spec.algs {
+		binary.Write(&specData, binary.LittleEndian, alg)
+	}
+	binary.Write(&specData, binary.LittleEndian, uint8(len(spec.vendorInfo)))
+	specData.Write(spec.vendorInfo)
+
+	firstEvHdr := rawEventHeader{
+		PCRIndex:  0,
+		Type:      uint32(eventTypeNoAction),
+		Digest:    [20]byte{},
+		EventSize: uint32(specData.Len()),
+	}
+	binary.Write(&buf, binary.LittleEndian, firstEvHdr)
+	buf.Write(specData.Bytes())
+
+	// write all rawEvents in TCG2 crypto-agile format.
+	for _, ev := range e.rawEvents {
+		binary.Write(&buf, binary.LittleEndian, rawEvent2Header{
+			PCRIndex: uint32(ev.index),
+			Type:     uint32(ev.typ),
+		})
+		binary.Write(&buf, binary.LittleEndian, uint32(len(ev.digests)))
+		for _, d := range ev.digests {
+			algID, err := algToID(d.hash)
+			if err != nil {
+				return nil, fmt.Errorf("event PCR%d: %w", ev.index, err)
+			}
+			binary.Write(&buf, binary.LittleEndian, algID)
+			buf.Write(d.data)
+		}
+		binary.Write(&buf, binary.LittleEndian, uint32(len(ev.data)))
+		buf.Write(ev.data)
+	}
+
+	return buf.Bytes(), nil
+}
+
 // Events returns events that have not been replayed against the PCR values and
 // are therefore unverified. The returned events contain the digest that matches
 // the provided hash algorithm, or are empty if that event didn't contain a
@@ -506,7 +578,13 @@ func ParseEventLog(measurementLog []byte) (*EventLog, error) {
 }
 
 type specIDEvent struct {
-	algs []specAlgSize
+	platformClass uint32
+	versionMinor  uint8
+	versionMajor  uint8
+	errata        uint8
+	uintnSize     uint8
+	algs          []specAlgSize
+	vendorInfo    []byte
 }
 
 type specAlgSize struct {
@@ -560,7 +638,13 @@ func parseSpecIDEvent(b []byte) (*specIDEvent, error) {
 	}
 
 	specAlg := specAlgSize{}
-	e := specIDEvent{}
+	e := specIDEvent{
+		platformClass: header.PlatformClass,
+		versionMinor:  header.VersionMinor,
+		versionMajor:  header.VersionMajor,
+		errata:        header.Errata,
+		uintnSize:     header.UintnSize,
+	}
 	for i := 0; i < int(header.NumAlgs); i++ {
 		if err := binary.Read(r, binary.LittleEndian, &specAlg); err != nil {
 			return nil, fmt.Errorf("reading algorithm: %v", err)
@@ -574,6 +658,12 @@ func parseSpecIDEvent(b []byte) (*specIDEvent, error) {
 	}
 	if r.Len() != int(vendorInfoSize) {
 		return nil, fmt.Errorf("reading vendor info, expected %d remaining bytes, got %d", vendorInfoSize, r.Len())
+	}
+	if vendorInfoSize > 0 {
+		e.vendorInfo = make([]byte, vendorInfoSize)
+		if _, err := io.ReadFull(r, e.vendorInfo); err != nil {
+			return nil, fmt.Errorf("reading vendor info: %v", err)
+		}
 	}
 	return &e, nil
 }
