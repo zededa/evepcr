@@ -40,7 +40,7 @@ jobs:
 
       - name: Run PCR prediction test
         if: steps.kvm.outputs.available == 'true'
-        run: bash script/test_pcr_prediction.sh
+        run: bash test/script/test_pcr_prediction.sh
 
       - name: Upload logs
         if: ${{ always() }}
@@ -48,7 +48,7 @@ jobs:
         with:
           name: pcr-prediction-logs
           path: |
-            script/test_pcr_prediction.log
+            test/script/test_pcr_prediction.log
             out/
 
   tpmea:
@@ -80,7 +80,7 @@ jobs:
 
       - name: Run TPM EA test
         if: steps.kvm.outputs.available == 'true'
-        run: bash script/test_tpmea.sh
+        run: bash test/script/test_tpmea.sh
 
       - name: Upload logs
         if: ${{ always() }}
@@ -88,7 +88,7 @@ jobs:
         with:
           name: tpmea-logs
           path: |
-            script/test_tpmea.log
+            test/script/test_tpmea.log
             out/
 
   tpmea-baseline:
@@ -120,7 +120,7 @@ jobs:
 
       - name: Run TPM EA baseline test
         if: steps.kvm.outputs.available == 'true'
-        run: bash script/test_tpmea_baseline.sh
+        run: bash test/script/test_tpmea_baseline.sh
 
       - name: Upload logs
         if: ${{ always() }}
@@ -128,5 +128,5 @@ jobs:
         with:
           name: tpmea-baseline-logs
           path: |
-            script/test_tpmea_baseline.log
+            test/script/test_tpmea_baseline.log
             out/

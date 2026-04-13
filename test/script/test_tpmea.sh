@@ -3,46 +3,43 @@
 # Copyright (c) 2026 Zededa, Inc.
 # SPDX-License-Identifier: Apache-2.0
 #
-# test_tpmea_baseline.sh - end-to-end test for TPM EA policy across EVE OS updates.
+# test_tpmea.sh - end-to-end test for TPM EA policy across EVE OS updates.
 #
-# Like test_tpmea.sh but uses baseline-only PCR prediction: the policy bundle
-# is generated from the v1 event log and the v2 rootfs image alone, without
-# capturing a second event log from the running v2 system.
+# Boots two consecutive EVE versions in QEMU (TPM enabled), captures TPM
+# measurements before and after an update, then validates that:
+#   - the initial single policy seals a secret on EVE v1
+#   - a policy bundle generated from predicted PCR values can unseal
 #
-# Usage: ./test_tpmea_baseline.sh [--skip-build] [--clean] [--verbose]
+# Usage: ./test_tpmea.sh [--skip-build] [--clean]
 #
 
 set -euo pipefail
 
-
-exec > >(tee "${BASH_SOURCE[0]%.sh}.log") 2>&1
+_TEST_LOG="${TEST_LOG:-${BASH_SOURCE[0]%.sh}.log}"
+# Use a file descriptor so tee flushes reliably on exit.
+exec > >(stdbuf -oL tee "$_TEST_LOG") 2>&1
 
 # ── option parsing ─────────────────────────────────────────────────────────────
 SKIP_BUILD=false
 CLEAN=false
-VERBOSE=false
 for arg in "$@"; do
     case "$arg" in
         --skip-build) SKIP_BUILD=true ;;
         --clean)      CLEAN=true ;;
-        --verbose)    VERBOSE=true ;;
         *) echo "[ERROR] Unknown option: $arg" >&2; exit 1 ;;
     esac
 done
 
 # ── configuration ─────────────────────────────────────────────────────────────
-EVE_VERSION_1="16.1.0"
-EVE_VERSION_2="16.2.0"
-# Full version string as it appears in the TPM event log (grub_cmd setparams / menuentry).
-# EVE appends the hypervisor and architecture to the short version: <ver>-<hv>-<arch>.
-EVE_VERSION_2_FULL="16.2.0-kvm-amd64"
+EVE_VERSION_1="${EVE_VERSION_1:-14.5.3-rc4}"
+EVE_VERSION_2="${EVE_VERSION_2:-16.11.0}"
 
 EVE_SERIAL="shahshah"
 SSH_PORT=2222
 
 EVE_REPO_URL="https://github.com/lf-edge/eve.git"
 EVE_RELEASES_URL="https://github.com/lf-edge/eve/releases/download"
-ROOTFS_ASSET="amd64.kvm.generic.rootfs.img"
+ROOTFS_ASSET="${ROOTFS_ASSET:-amd64.kvm.generic.rootfs.img}"
 
 # PCR indexes to bind the policy to.
 PCR_INDEXES="0 1 2 3 4 6 7 8 9 13 14"
@@ -52,11 +49,12 @@ NV_INDEX="0x1500016"
 NV_COUNTER_INDEX="0x1500017"
 
 # Working directory
-WORK_DIR="$PWD/out/tpmea-bl"
+WORK_DIR="$PWD/out/tpmea-test-workdir"
 
 # ── derived paths ─────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
+WORKSPACE_ROOT="$(cd "$REPO_ROOT/.." && pwd)"
 
 EVE_DIR="$WORK_DIR/eve"
 ROOTFS_DIR="$WORK_DIR/rootfs"
@@ -139,14 +137,18 @@ wait_for_ssh() {
 }
 
 wait_for_onboard() {
-    log_info "Waiting for EVE to onboard (checking /run/diag.out)..."
-    while true; do
+    local timeout=120
+    local elapsed=0
+    log_info "Waiting for EVE to onboard (checking /run/diag.out, timeout ${timeout}s)..."
+    while [ "$elapsed" -lt "$timeout" ]; do
         if ssh_cmd "grep -q 'Connected to EV Controller and onboarded' /run/diag.out 2>/dev/null"; then
             log_info "EVE is onboarded."
-            break
+            return
         fi
         sleep 15
+        elapsed=$((elapsed + 15))
     done
+    log_info "WARNING: onboard not detected after ${timeout}s - continuing anyway"
 }
 
 reboot_and_wait() {
@@ -234,7 +236,7 @@ build_pcr_args() {
 }
 
 # pcr_indexes_csv <space-separated-indexes>
-# Converts "4 14" -> "4,14" for -pcr-indexes flag.
+# Converts "4 14" → "4,14" for -pcr-indexes flag.
 pcr_indexes_csv() {
     echo "$*" | tr ' ' ','
 }
@@ -271,7 +273,7 @@ log_info "Building gen-policy (host)..."
 (cd "$REPO_ROOT/cmd/gen-policy" && go build -o gen-policy .)
 
 VALIDATE_BUILD_LOG="$WORK_DIR/validate-policy_build.log"
-log_info "Building validate-policy (static linux/amd64 for EVE) -> $VALIDATE_BUILD_LOG"
+log_info "Building validate-policy (static linux/amd64 for EVE) → $VALIDATE_BUILD_LOG"
 # CGO_ENABLED=0 produces a pure-Go binary with no libc dependency - runs on
 # EVE's musl without any dynamic linker. GOOS/GOARCH cross-compiles from host.
 (
@@ -318,6 +320,24 @@ pushd "$EVE_DIR" > /dev/null
 git checkout "$EVE_VERSION_1"
 popd > /dev/null
 
+# ── step 4a: patch Makefile for serial if needed ──────────────────────────────
+
+log_step "=== Step 4a: Patch EVE Makefile for QEMU serial ==="
+
+EVE_MAKEFILE="$EVE_DIR/Makefile"
+if grep -q 'QEMU_EVE_SERIAL' "$EVE_MAKEFILE"; then
+    log_info "Makefile already supports QEMU_EVE_SERIAL - no patch needed"
+else
+    if grep -q 'serial=31415926' "$EVE_MAKEFILE"; then
+        log_info "Patching serial=31415926 → serial=$EVE_SERIAL in Makefile"
+        sed -i "s/serial=31415926/serial=$EVE_SERIAL/g" "$EVE_MAKEFILE"
+        patched=$(grep -c "serial=$EVE_SERIAL" "$EVE_MAKEFILE")
+        log_info "Patched $patched occurrence(s)"
+    else
+        log_info "No serial=31415926 found in Makefile - skipping"
+    fi
+fi
+
 # ── step 5: generate SSH key and install into EVE conf ────────────────────────
 
 log_step "=== Step 5: SSH key setup ==="
@@ -353,19 +373,19 @@ ADAM_CERTS="$ADAM_DIR/run/certs/server-tls.crt"
 
 if [ -f "$ADAM_BIN" ] && [ -f "$ADAM_CERTS" ]; then
     log_info "Adam binary and certs already exist - skipping build"
-    log_info "Running bootstrap.sh --run -> $ADAM_RUN_LOG"
+    log_info "Running bootstrap.sh --run → $ADAM_RUN_LOG"
     pushd "$ADAM_DIR" > /dev/null
     EVE_CONFIG="$EVE_DIR/conf" EVE_SERIAL="$EVE_SERIAL" ./bootstrap.sh --run > "$ADAM_RUN_LOG" 2>&1 &
     ADAM_PID=$!
     popd > /dev/null
 else
-    log_info "Building Adam (commit $ADAM_COMMIT) -> $ADAM_BUILD_LOG"
+    log_info "Building Adam (commit $ADAM_COMMIT) → $ADAM_BUILD_LOG"
     pushd "$ADAM_DIR" > /dev/null
     make > "$ADAM_BUILD_LOG" 2>&1
     popd > /dev/null
     log_info "Adam built."
 
-    log_info "Running bootstrap.sh --yes -> $ADAM_RUN_LOG"
+    log_info "Running bootstrap.sh --yes → $ADAM_RUN_LOG"
     pushd "$ADAM_DIR" > /dev/null
     EVE_CONFIG="$EVE_DIR/conf" EVE_SERIAL="$EVE_SERIAL" OVERWRITE_YES=true ./bootstrap.sh --yes > "$ADAM_RUN_LOG" 2>&1 &
     ADAM_PID=$!
@@ -422,7 +442,7 @@ elif $SKIP_BUILD; then
     log_info "Skipping build (--skip-build)"
 else
     BUILD_LOG="$WORK_DIR/eve_build.log"
-    log_info "Build output -> $BUILD_LOG"
+    log_info "Build output → $BUILD_LOG"
     pushd "$EVE_DIR" > /dev/null
     make pkg/pillar live > "$BUILD_LOG" 2>&1
     popd > /dev/null
@@ -433,7 +453,7 @@ fi
 log_step "=== Step 8: Boot EVE and wait for onboarding ==="
 
 EVE_RUN_LOG="$WORK_DIR/eve_run.log"
-log_info "EVE run log -> $EVE_RUN_LOG"
+log_info "EVE run log → $EVE_RUN_LOG"
 pushd "$EVE_DIR" > /dev/null
 make run TPM=Y QEMU_EVE_SERIAL="$EVE_SERIAL" > "$EVE_RUN_LOG" 2>&1 &
 QEMU_PID=$!
@@ -548,56 +568,13 @@ ssh_cmd "/persist/validate-policy \
     $PCR_INDEXES"
 log_info "Secret sealed - NV index $NV_INDEX."
 
-# ── step 10d: predict post-update PCR values from baseline ────────────────────
-
-log_step "=== Step 10d: Predict post-update PCR values (baseline-only) ==="
-
-# PCR 14 is set in user-mode and is stable across updates - carry it forward.
-BASELINE_PCR14=$(get_pcr_sha256 "$BASELINE_PCRS" 14)
-if [ -z "$BASELINE_PCR14" ]; then
-    log_error "Could not extract PCR 14 from $BASELINE_PCRS"
-    exit 1
-fi
-log_info "Baseline PCR 14 (sha256): $BASELINE_PCR14"
-
-# No -new flag: uses baseline-only prediction mode.  The v2 rootfs image
-# patches PCR 13; PCR 14 is passed as a known override.
-PREDICT_VERBOSE_FLAG=""
-$VERBOSE && PREDICT_VERBOSE_FLAG="-verbose"
-"$EVE_PREDICT" \
-    -old     "$BASELINE_EVENTLOG" \
-    -rootfs  "$ROOTFS_V2" \
-    -version "$EVE_VERSION_2_FULL" \
-    -out           "$PREDICTIONS_GOB" \
-    -dump-eventlog "$MEASUREMENTS_DIR/predicted_evlog" \
-    $PREDICT_VERBOSE_FLAG \
-    "14:$BASELINE_PCR14"
-
-log_info "Predictions written to $PREDICTIONS_GOB"
-
-# ── step 10e: generate policy bundle from predictions ─────────────────────────
-
-log_step "=== Step 10e: Generate policy bundle ==="
-
-start_swtpm
-SWTPM_PATH="$SWTPM_SRV_SOCK" "$GEN_POLICY" \
-    -key           "$POLICY_SIGNING_KEY" \
-    -counter-index "$NV_COUNTER_INDEX" \
-    -counter-val   3 \
-    -predict-gob   "$PREDICTIONS_GOB" \
-    -pcr-indexes   "$(pcr_indexes_csv $PCR_INDEXES)" \
-    -out           "$BUNDLE_JSON"
-stop_swtpm
-
-log_info "Policy bundle written to $BUNDLE_JSON"
-
 # ── step 11: write new rootfs to other partition ───────────────────────────────
 
 log_step "=== Step 11: Flash $EVE_VERSION_2 rootfs to other partition ==="
 
 CURPART=$(ssh_cmd "eve exec pillar zboot curpart")
 OTHERPART=$([ "$CURPART" = "IMGA" ] && echo "IMGB" || echo "IMGA")
-log_info "Current partition: $CURPART  ->  target partition: $OTHERPART"
+log_info "Current partition: $CURPART  →  target partition: $OTHERPART"
 
 OTHER_PARTDEV=$(ssh_cmd "lsblk -rno NAME,PARTLABEL | awk -v p='$OTHERPART' '\$2==p {print \"/dev/\" \$1}'")
 if [ -z "$OTHER_PARTDEV" ]; then
@@ -615,13 +592,65 @@ ssh_cmd "dd if=/persist/rootfs-v2.img of=$OTHER_PARTDEV bs=4M && sync"
 log_info "Setting $OTHERPART state to 'updating'..."
 ssh_cmd "eve exec pillar zboot set_partstate $OTHERPART updating"
 
-# ── step 11a: embed bundle in v2 partition (before reboot) ────────────────────
+# ── step 12: reboot into updated partition ────────────────────────────────────
 
-log_step "=== Step 11a: Embed bundle in v2 partition ==="
+log_step "=== Step 12: Reboot into updated partition ==="
 
-# The bundle is appended beyond the squashfs measured region so the TPM
-# measurement of OTHERPART (v2) is not affected.  The payload format is
-# an 8-byte little-endian JSON size followed by the JSON bytes.
+reboot_and_wait
+
+# ── step 13: capture updated TPM measurements ─────────────────────────────────
+
+log_step "=== Step 13: Capture updated TPM measurements ==="
+
+log_info "Fetching updated TPM event log..."
+ssh_cmd "cat /sys/kernel/security/tpm0/binary_bios_measurements" > "$UPDATED_EVENTLOG"
+log_info "Saved: $UPDATED_EVENTLOG"
+
+# ── step 14: predict post-update PCR values ───────────────────────────────────
+
+log_step "=== Step 14: Predict post-update PCR values ==="
+
+# PCR 14 is stable across updates - carry it forward from baseline.
+BASELINE_PCR14=$(get_pcr_sha256 "$BASELINE_PCRS" 14)
+if [ -z "$BASELINE_PCR14" ]; then
+    log_error "Could not extract PCR 14 from $BASELINE_PCRS"
+    exit 1
+fi
+log_info "Baseline PCR 14 (sha256): $BASELINE_PCR14"
+
+"$EVE_PREDICT" \
+    -old    "$BASELINE_EVENTLOG" \
+    -new    "$UPDATED_EVENTLOG" \
+    -rootfs "$ROOTFS_V2" \
+    -out           "$PREDICTIONS_GOB" \
+    -dump-eventlog "$MEASUREMENTS_DIR/predicted_evlog" \
+    -algo   sha256 \
+    "14:$BASELINE_PCR14"
+
+log_info "Predictions written to $PREDICTIONS_GOB"
+
+# ── step 14a: generate policy bundle from predictions ─────────────────────────
+
+log_step "=== Step 14a: Generate policy bundle ==="
+
+start_swtpm
+SWTPM_PATH="$SWTPM_SRV_SOCK" "$GEN_POLICY" \
+    -key           "$POLICY_SIGNING_KEY" \
+    -counter-index "$NV_COUNTER_INDEX" \
+    -counter-val   3 \
+    -predict-gob   "$PREDICTIONS_GOB" \
+    -pcr-indexes   "$(pcr_indexes_csv $PCR_INDEXES)" \
+    -out           "$BUNDLE_JSON"
+stop_swtpm
+
+log_info "Policy bundle written to $BUNDLE_JSON"
+log_info "Uploading bundle to EVE..."
+scp_to_eve "$BUNDLE_JSON" "/persist/bundle.json"
+
+# ── step 14b: embed bundle in active v2 partition (after squashfs measured region) ──
+
+log_step "=== Step 14b: Embed bundle in active v2 partition ==="
+
 BUNDLE_PAYLOAD="$WORK_DIR/bundle_payload"
 BUNDLE_SIZE=$(wc -c < "$BUNDLE_JSON" | awk '{print $1}')
 python3 -c "import struct,sys; sys.stdout.buffer.write(struct.pack('<Q', $BUNDLE_SIZE))" > "$BUNDLE_PAYLOAD"
@@ -637,49 +666,32 @@ ssh_cmd "
     rm -f /persist/bundle_payload
     echo \"bundle embedded at offset \$SQFS_SIZE on \$PARTDEV\"
 "
-log_info "Bundle embedded in v2 partition."
+log_info "Bundle embedded in active v2 partition."
 
-# ── step 12: reboot into updated partition ────────────────────────────────────
+# ── step 15: verify old policy is rejected after update ───────────────────────
 
-log_step "=== Step 12: Reboot into updated partition ==="
+log_step "=== Step 15: Verify old (v1) policy is rejected ==="
 
-reboot_and_wait
-
-# ── step 12a: capture updated TPM event log (for debugging) ──────────────────
-
-log_step "=== Step 12a: Capture updated TPM event log ==="
-
-ssh_cmd "cat /sys/kernel/security/tpm0/binary_bios_measurements" > "$UPDATED_EVENTLOG"
-log_info "Saved: $UPDATED_EVENTLOG"
-
-# ── step 13: verify old policy is rejected after update ───────────────────────
-
-log_step "=== Step 13: Verify old (v1) policy is rejected ==="
-
-VALIDATE_VERBOSE_FLAG=""
-$VERBOSE && VALIDATE_VERBOSE_FLAG="-verbose"
 if ssh_cmd "/persist/validate-policy \
     -policy        /persist/policy.json \
     -pub           /persist/policy_signing_key.pub.pem \
     -nv-index      $NV_INDEX \
     -counter-index $NV_COUNTER_INDEX \
-    $VALIDATE_VERBOSE_FLAG \
     $PCR_INDEXES" 2>&1; then
     log_error "Old policy unsealed successfully - expected failure after update"
     exit 1
 fi
 log_info "Old policy correctly rejected by EVE v2 PCRs."
 
-# ── step 14: verify policy bundle can unseal ──────────────────────────────────
+# ── step 16: verify policy bundle can unseal ──────────────────────────────────
 
-log_step "=== Step 14: Verify policy bundle unseals secret ==="
+log_step "=== Step 16: Verify policy bundle unseals secret ==="
 
 ssh_cmd "/persist/validate-policy \
     -local \
     -pub           /persist/policy_signing_key.pub.pem \
     -nv-index      $NV_INDEX \
     -counter-index $NV_COUNTER_INDEX \
-    $VALIDATE_VERBOSE_FLAG \
     $PCR_INDEXES"
 log_info "Policy bundle correctly unsealed secret on EVE v2."
 

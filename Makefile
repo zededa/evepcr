@@ -1,4 +1,4 @@
-ROOTFS_IMG := testdata/rootfs/rootfs.img
+ROOTFS_IMG := test/testdata/rootfs/rootfs.img
 ROOTFS_URL := https://github.com/zededa/tpm-event-verifier/releases/download/v0.0.0/rootfs.img
 
 .PHONY: test build clean

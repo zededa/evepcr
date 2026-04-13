@@ -19,9 +19,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 TEST_SCRIPT="$SCRIPT_DIR/test_tpmea.sh"
 MATRIX_FILE="$SCRIPT_DIR/test_matrix.txt"
-LOG_DIR="$SCRIPT_DIR/../out/matrix-logs"
+LOG_DIR="$REPO_ROOT/out/matrix-logs"
 
 EVE_RELEASES_URL="https://github.com/lf-edge/eve/releases/download"
 GITHUB_API_URL="https://api.github.com/repos/lf-edge/eve/releases"

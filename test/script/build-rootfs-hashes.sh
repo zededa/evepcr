@@ -21,7 +21,7 @@ set -euo pipefail
 exec > >(tee "${BASH_SOURCE[0]%.sh}.log") 2>&1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 
 EVE_REPO_URL="https://github.com/lf-edge/eve.git"
 EVE_RELEASES_URL="https://github.com/lf-edge/eve/releases/download"

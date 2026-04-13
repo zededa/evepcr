@@ -33,6 +33,6 @@ make test
 
 Downloads a rootfs test fixture on first run, then runs `go test ./...`.
 
-End-to-end integration tests live in `script/` and boot real EVE images
+End-to-end integration tests live in `test/script/` and boot real EVE images
 in QEMU with a software TPM. See [docs/tests.md](docs/tests.md) for
 details.

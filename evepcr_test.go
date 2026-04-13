@@ -17,12 +17,12 @@ import (
 func TestPcrFive(t *testing.T) {
 	// PCR 5 can vary based on the hard disk configuration, but it also shouldn't change
 	// much except attributes of IMAGA/IMGB partition.
-	oldTable, err := GetGptPartitionTableFromFile("testdata/src_version/14.5.1bcbf.bin", nil, nil, nil, false)
+	oldTable, err := GetGptPartitionTableFromFile("test/testdata/src_version/14.5.1bcbf.bin", nil, nil, nil, false)
 	if err != nil {
 		t.Errorf("GetPartitionTable failed: %v", err)
 	}
 
-	newTable, err := GetGptPartitionTableFromFile("testdata/dst_version/14.5_stable.bin", nil, nil, nil, false)
+	newTable, err := GetGptPartitionTableFromFile("test/testdata/dst_version/14.5_stable.bin", nil, nil, nil, false)
 	if err != nil {
 		t.Errorf("GetPartitionTable failed: %v", err)
 	}
@@ -80,8 +80,8 @@ func TestPcrPredictionFull(t *testing.T) {
 	// Use a dst log that has both IMGA and IMGB so all 8 partition state
 	// variants are synthesized. binary_bios_measurements_IMGB_active fits
 	// because it was captured from a fully updated device with both partitions.
-	allPCRs, _, err := PredictPCRsFromFiles("testdata/src_version/14.5.1bcbf.bin",
-		"testdata/dst_version/binary_bios_measurements_IMGB_active", nil)
+	allPCRs, _, err := PredictPCRsFromFiles("test/testdata/src_version/14.5.1bcbf.bin",
+		"test/testdata/dst_version/binary_bios_measurements_IMGB_active", nil)
 	if err != nil {
 		t.Fatalf("PredictPCRs failed: %v", err)
 	}
@@ -104,13 +104,13 @@ func TestPcrPredictionFull(t *testing.T) {
 
 func TestPcrPrediction(t *testing.T) {
 	// dst has only IMGA (no IMGB) → 2 variants: IMGA-active and IMGA-updating.
-	allPCRs, _, err := PredictPCRsFromFiles("testdata/src_version/14.5.1bcbf.bin",
-		"testdata/dst_version/14.5_stable.bin", nil)
+	allPCRs, _, err := PredictPCRsFromFiles("test/testdata/src_version/14.5.1bcbf.bin",
+		"test/testdata/dst_version/14.5_stable.bin", nil)
 	if err != nil {
 		t.Fatalf("PredictPCRs failed: %v", err)
 	}
 
-	expectedPcrs, err := ReadPCRs("testdata/dst_version/14.5_stable.pcr.yml", false)
+	expectedPcrs, err := ReadPCRs("test/testdata/dst_version/14.5_stable.pcr.yml", false)
 	if err != nil {
 		t.Fatalf("ReadPCRs failed: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestPcrPrediction(t *testing.T) {
 }
 
 func TestHashRootfsImage(t *testing.T) {
-	img, err := os.ReadFile("testdata/rootfs/rootfs.img")
+	img, err := os.ReadFile("test/testdata/rootfs/rootfs.img")
 	if err != nil {
 		t.Skipf("rootfs image not available (%v), skipping", err)
 	}
@@ -178,9 +178,9 @@ func TestHashRootfsImage(t *testing.T) {
 }
 
 func TestPredictPCRsWithRootfsHash(t *testing.T) {
-	const eventLog = "testdata/rootfs/tpm-event-log.bin"
+	const eventLog = "test/testdata/rootfs/tpm-event-log.bin"
 
-	img, err := os.ReadFile("testdata/rootfs/rootfs.img")
+	img, err := os.ReadFile("test/testdata/rootfs/rootfs.img")
 	if err != nil {
 		t.Skipf("rootfs image not available (%v), skipping", err)
 	}
@@ -220,14 +220,14 @@ func TestPredictPCRsWithRootfsHash(t *testing.T) {
 }
 
 func TestEventLogValidation(t *testing.T) {
-	attestPCRs, err := GetAttestedPCRs("testdata/src_version/14.5.1bcbf.pcr.yml")
+	attestPCRs, err := GetAttestedPCRs("test/testdata/src_version/14.5.1bcbf.pcr.yml")
 	if err != nil {
 		t.Fatalf("GetAttestedPCRs failed: %v", err)
 	}
 
 	// Read the PCR values received from a device, it is assumed that this PCR values
 	// were TPM quoted with a valid signature.
-	evntlogFile, err := os.ReadFile("testdata/src_version/14.5.1bcbf.bin")
+	evntlogFile, err := os.ReadFile("test/testdata/src_version/14.5.1bcbf.bin")
 	if err != nil {
 		t.Fatalf("ReadFile failed: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestEventLogValidation(t *testing.T) {
 // PredictPCRsFromBaseline produces the same results as PredictPCRs when
 // the same event log is passed as both src and dst.
 func TestPredictPCRsFromBaseline_MatchesFullPredict(t *testing.T) {
-	const eventlog = "testdata/src_version/14.5.1bcbf.bin"
+	const eventlog = "test/testdata/src_version/14.5.1bcbf.bin"
 
 	got, _, err := PredictPCRsFromBaselineFile(eventlog, nil, "", nil)
 	if err != nil {
@@ -276,7 +276,7 @@ func TestPredictPCRsFromBaseline_MatchesFullPredict(t *testing.T) {
 // TestPredictPCRsFromBaseline_PCROverride checks that a value in pcrOverrides
 // replaces the predicted set for that index, while other PCRs are unaffected.
 func TestPredictPCRsFromBaseline_PCROverride(t *testing.T) {
-	const eventlog = "testdata/src_version/14.5.1bcbf.bin"
+	const eventlog = "test/testdata/src_version/14.5.1bcbf.bin"
 
 	known14, _ := hex.DecodeString("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")
 	overrides := map[int][]byte{14: known14}
@@ -299,8 +299,8 @@ func TestPredictPCRsFromBaseline_PCROverride(t *testing.T) {
 // TestPredictPCRsFromBaseline_RootfsHash checks that rootfsHash patches PCR 13
 // the same way it does in PredictPCRs.
 func TestPredictPCRsFromBaseline_RootfsHash(t *testing.T) {
-	const eventlog = "testdata/rootfs/tpm-event-log.bin"
-	const rootfsImg = "testdata/rootfs/rootfs.img"
+	const eventlog = "test/testdata/rootfs/tpm-event-log.bin"
+	const rootfsImg = "test/testdata/rootfs/rootfs.img"
 
 	img, err := os.ReadFile(rootfsImg)
 	if err != nil {
