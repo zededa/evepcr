@@ -251,6 +251,7 @@ require_tool python3
 require_tool ssh
 require_tool ssh-keygen
 require_tool openssl
+require_tool jq
 require_tool swtpm
 
 if $CLEAN && [ -d "$WORK_DIR" ]; then
@@ -377,6 +378,38 @@ until grep -q "Starting adam" "$ADAM_RUN_LOG" 2>/dev/null; do
     sleep 1
 done
 log_info "Adam is up."
+
+# ── step 6a: inject SSH key into Adam device config ──────────────────────────
+
+log_step "=== Step 6a: Inject SSH key into Adam device config ==="
+
+ADAM_DEVICE_DIR="$ADAM_DIR/run/adam/device"
+
+# Wait for bootstrap's add_device to create the device directory.
+log_info "Waiting for device config to appear..."
+DEVICE_CONFIG=""
+for i in $(seq 1 30); do
+    DEVICE_CONFIG=$(find "$ADAM_DEVICE_DIR" -name "config.json" 2>/dev/null | head -1) || true
+    [ -n "$DEVICE_CONFIG" ] && break
+    sleep 2
+done
+if [ -z "$DEVICE_CONFIG" ]; then
+    log_error "Device config.json not found under $ADAM_DEVICE_DIR after 60s"
+    exit 1
+fi
+log_info "Found device config: $DEVICE_CONFIG"
+
+SSH_PUB_KEY=$(cat "${SSH_KEY}.pub")
+log_info "Injecting SSH public key into device config (debug.enable.ssh)"
+
+jq --arg key "$SSH_PUB_KEY" '
+    .configItems = [
+        (.configItems // [] | .[] | select(.key != "debug.enable.ssh")),
+        {"key": "debug.enable.ssh", "value": $key}
+    ]
+' "$DEVICE_CONFIG" > "${DEVICE_CONFIG}.tmp" && mv "${DEVICE_CONFIG}.tmp" "$DEVICE_CONFIG"
+
+log_info "Device config updated with SSH key."
 
 # ── step 7: build EVE version 1 ───────────────────────────────────────────────
 
