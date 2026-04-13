@@ -15,7 +15,9 @@
 
 set -euo pipefail
 
-exec > >(tee "${BASH_SOURCE[0]%.sh}.log") 2>&1
+_TEST_LOG="${TEST_LOG:-${BASH_SOURCE[0]%.sh}.log}"
+# Use a file descriptor so tee flushes reliably on exit.
+exec > >(stdbuf -oL tee "$_TEST_LOG") 2>&1
 
 # ── option parsing ─────────────────────────────────────────────────────────────
 SKIP_BUILD=false
@@ -29,15 +31,15 @@ for arg in "$@"; do
 done
 
 # ── configuration ─────────────────────────────────────────────────────────────
-EVE_VERSION_1="14.5.3-rc4"
-EVE_VERSION_2="16.11.0"
+EVE_VERSION_1="${EVE_VERSION_1:-14.5.3-rc4}"
+EVE_VERSION_2="${EVE_VERSION_2:-16.11.0}"
 
 EVE_SERIAL="shahshah"
 SSH_PORT=2222
 
 EVE_REPO_URL="https://github.com/lf-edge/eve.git"
 EVE_RELEASES_URL="https://github.com/lf-edge/eve/releases/download"
-ROOTFS_ASSET="amd64.kvm.generic.rootfs.img"
+ROOTFS_ASSET="${ROOTFS_ASSET:-amd64.kvm.generic.rootfs.img}"
 
 # PCR indexes to bind the policy to.
 PCR_INDEXES="0 1 2 3 4 6 7 8 9 13 14"
@@ -135,14 +137,18 @@ wait_for_ssh() {
 }
 
 wait_for_onboard() {
-    log_info "Waiting for EVE to onboard (checking /run/diag.out)..."
-    while true; do
+    local timeout=120
+    local elapsed=0
+    log_info "Waiting for EVE to onboard (checking /run/diag.out, timeout ${timeout}s)..."
+    while [ "$elapsed" -lt "$timeout" ]; do
         if ssh_cmd "grep -q 'Connected to EV Controller and onboarded' /run/diag.out 2>/dev/null"; then
             log_info "EVE is onboarded."
-            break
+            return
         fi
         sleep 15
+        elapsed=$((elapsed + 15))
     done
+    log_info "WARNING: onboard not detected after ${timeout}s - continuing anyway"
 }
 
 reboot_and_wait() {
@@ -247,6 +253,7 @@ require_tool python3
 require_tool ssh
 require_tool ssh-keygen
 require_tool openssl
+require_tool jq
 require_tool swtpm
 
 if $CLEAN && [ -d "$WORK_DIR" ]; then
@@ -313,6 +320,24 @@ pushd "$EVE_DIR" > /dev/null
 git checkout "$EVE_VERSION_1"
 popd > /dev/null
 
+# ── step 4a: patch Makefile for serial if needed ──────────────────────────────
+
+log_step "=== Step 4a: Patch EVE Makefile for QEMU serial ==="
+
+EVE_MAKEFILE="$EVE_DIR/Makefile"
+if grep -q 'QEMU_EVE_SERIAL' "$EVE_MAKEFILE"; then
+    log_info "Makefile already supports QEMU_EVE_SERIAL - no patch needed"
+else
+    if grep -q 'serial=31415926' "$EVE_MAKEFILE"; then
+        log_info "Patching serial=31415926 → serial=$EVE_SERIAL in Makefile"
+        sed -i "s/serial=31415926/serial=$EVE_SERIAL/g" "$EVE_MAKEFILE"
+        patched=$(grep -c "serial=$EVE_SERIAL" "$EVE_MAKEFILE")
+        log_info "Patched $patched occurrence(s)"
+    else
+        log_info "No serial=31415926 found in Makefile - skipping"
+    fi
+fi
+
 # ── step 5: generate SSH key and install into EVE conf ────────────────────────
 
 log_step "=== Step 5: SSH key setup ==="
@@ -373,6 +398,38 @@ until grep -q "Starting adam" "$ADAM_RUN_LOG" 2>/dev/null; do
     sleep 1
 done
 log_info "Adam is up."
+
+# ── step 6a: inject SSH key into Adam device config ──────────────────────────
+
+log_step "=== Step 6a: Inject SSH key into Adam device config ==="
+
+ADAM_DEVICE_DIR="$ADAM_DIR/run/adam/device"
+
+# Wait for bootstrap's add_device to create the device directory.
+log_info "Waiting for device config to appear..."
+DEVICE_CONFIG=""
+for i in $(seq 1 30); do
+    DEVICE_CONFIG=$(find "$ADAM_DEVICE_DIR" -name "config.json" 2>/dev/null | head -1) || true
+    [ -n "$DEVICE_CONFIG" ] && break
+    sleep 2
+done
+if [ -z "$DEVICE_CONFIG" ]; then
+    log_error "Device config.json not found under $ADAM_DEVICE_DIR after 60s"
+    exit 1
+fi
+log_info "Found device config: $DEVICE_CONFIG"
+
+SSH_PUB_KEY=$(cat "${SSH_KEY}.pub")
+log_info "Injecting SSH public key into device config (debug.enable.ssh)"
+
+jq --arg key "$SSH_PUB_KEY" '
+    .configItems = [
+        (.configItems // [] | .[] | select(.key != "debug.enable.ssh")),
+        {"key": "debug.enable.ssh", "value": $key}
+    ]
+' "$DEVICE_CONFIG" > "${DEVICE_CONFIG}.tmp" && mv "${DEVICE_CONFIG}.tmp" "$DEVICE_CONFIG"
+
+log_info "Device config updated with SSH key."
 
 # ── step 7: build EVE version 1 ───────────────────────────────────────────────
 
