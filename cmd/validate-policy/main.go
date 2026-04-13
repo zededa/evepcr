@@ -167,29 +167,12 @@ func unsealPath(nvIndex, counterIndex uint32, pub crypto.PublicKey, policies []p
 
 	currentCounter := uint64(0)
 	if counterIndex != 0 {
-		check := uint64(0)
-		if len(policies) > 0 {
-			check = policies[0].CounterCheck
-		}
-
-		// DefineMonotonicCounter returns the current value without
-		// incrementing when the counter already exists and is initialized.
 		val, err := tpmea.DefineMonotonicCounter(counterIndex)
 		if err != nil {
 			log.Fatalf("read counter 0x%x: %v", counterIndex, err)
 		}
-		log.Printf("counter 0x%x current value: %d (check value: %d)", counterIndex, val, check)
-
-		if val < check {
-			newVal, err := tpmea.IncreaseMonotonicCounter(counterIndex)
-			if err != nil {
-				log.Fatalf("increment counter 0x%x: %v", counterIndex, err)
-			}
-			currentCounter = newVal
-			log.Printf("counter 0x%x incremented to %d", counterIndex, currentCounter)
-		} else {
-			currentCounter = val
-		}
+		currentCounter = val
+		log.Printf("counter 0x%x current value: %d", counterIndex, val)
 	}
 
 	if verbose {
@@ -208,12 +191,12 @@ func unsealPath(nvIndex, counterIndex uint32, pub crypto.PublicKey, policies []p
 
 		var rbp tpmea.RBP
 		if counterIndex != 0 && entry.CounterCheck != 0 {
-			if currentCounter != entry.CounterCheck {
-				log.Printf("policy %d/%d: counter %d != check %d, skipping",
+			if currentCounter > entry.CounterCheck {
+				log.Printf("policy %d/%d: counter %d > check %d, skipping",
 					i+1, len(policies), currentCounter, entry.CounterCheck)
 				continue
 			}
-			rbp = tpmea.RBP{Counter: counterIndex, Check: currentCounter}
+			rbp = tpmea.RBP{Counter: counterIndex, Check: entry.CounterCheck}
 		}
 
 		secret, err := tpmea.UnsealSecret(nvIndex, pub, sp, sel, rbp)
@@ -221,7 +204,22 @@ func unsealPath(nvIndex, counterIndex uint32, pub crypto.PublicKey, policies []p
 			log.Printf("policy %d/%d: unseal failed (%v)", i+1, len(policies), err)
 			continue
 		}
+
 		log.Printf("policy %d/%d: unseal succeeded - secret: %q", i+1, len(policies), secret)
+
+		// After a successful unseal, increment the counter to the check
+		// value so that older policies with lower counter values can no
+		// longer unseal (rollback protection).
+		if counterIndex != 0 && entry.CounterCheck != 0 && currentCounter < entry.CounterCheck {
+			for currentCounter < entry.CounterCheck {
+				val, err := tpmea.IncreaseMonotonicCounter(counterIndex)
+				if err != nil {
+					log.Fatalf("increment counter 0x%x: %v", counterIndex, err)
+				}
+				currentCounter = val
+			}
+			log.Printf("counter 0x%x incremented to %d", counterIndex, currentCounter)
+		}
 		return
 	}
 
