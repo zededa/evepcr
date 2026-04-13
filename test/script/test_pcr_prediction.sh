@@ -45,7 +45,7 @@ WORK_DIR="$PWD/out/pcrpred-test-workdir"
 # ── derived paths ─────────────────────────────────────────────────────────────
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 
 EVE_DIR="$WORK_DIR/eve"
 ROOTFS_DIR="$WORK_DIR/rootfs"
