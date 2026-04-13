@@ -5,7 +5,7 @@
 #
 # build-rootfs-hashes.sh - for every EVE 14.x and 16.x LTS release tag,
 # download the rootfs image from GitHub releases, compute the PCR 13 hash
-# with eve-rootfs-hash, and write the results to a JSON file.
+# with rootfs-hash, and write the results to a JSON file.
 #
 # Output: out/rootfs-hashes.json
 #   {
@@ -14,7 +14,7 @@
 #     ...
 #   }
 #
-# Requirements: curl, git, jq, go (to build eve-rootfs-hash)
+# Requirements: curl, git, jq, go (to build rootfs-hash)
 #
 set -euo pipefail
 
@@ -35,7 +35,7 @@ LTS_ONLY_VERSIONS=("")
 
 OUT_DIR="$REPO_ROOT/out"
 OUT_FILE="$OUT_DIR/rootfs-hashes.json"
-TOOL="$REPO_ROOT/cmd/eve-rootfs-hash/eve-rootfs-hash"
+TOOL="$REPO_ROOT/cmd/rootfs-hash/rootfs-hash"
 
 TEMP_DIR=""
 
@@ -128,7 +128,7 @@ process_tag() {
     log_info "  Computing PCR 13 hash..."
     local hash
     if ! hash=$("$TOOL" "$img" 2>/dev/null); then
-        log_warn "  eve-rootfs-hash failed for $tag, skipping"
+        log_warn "  rootfs-hash failed for $tag, skipping"
         rm -f "$img"
         return 1
     fi
@@ -146,8 +146,8 @@ require_tool jq
 
 # Build the hash utility if not already built.
 if [ ! -x "$TOOL" ]; then
-    log_info "Building eve-rootfs-hash..."
-    (cd "$REPO_ROOT/cmd/eve-rootfs-hash" && go build -o eve-rootfs-hash .)
+    log_info "Building rootfs-hash..."
+    (cd "$REPO_ROOT/cmd/rootfs-hash" && go build -o rootfs-hash .)
 fi
 
 mkdir -p "$OUT_DIR"

@@ -54,8 +54,8 @@ SSH_KEY="$WORK_DIR/eve_ssh_key"
 
 ROOTFS_V2="$ROOTFS_DIR/${EVE_VERSION_2}.img"
 
-EVE_PREDICT="$REPO_ROOT/cmd/eve-predict/eve-predict"
-EVE_ROOTFS_HASH="$REPO_ROOT/cmd/eve-rootfs-hash/eve-rootfs-hash"
+EVE_PREDICT="$REPO_ROOT/cmd/predict/predict"
+EVE_ROOTFS_HASH="$REPO_ROOT/cmd/rootfs-hash/rootfs-hash"
 
 BASELINE_EVENTLOG="$MEASUREMENTS_DIR/baseline_eventlog"
 BASELINE_PCRS="$MEASUREMENTS_DIR/baseline_pcrs.yaml"
@@ -151,7 +151,7 @@ if $PREDICT_ONLY; then
         fi
     done
     # Still need the Go tools built.
-    for tool_name in eve-predict eve-rootfs-hash; do
+    for tool_name in predict rootfs-hash; do
         log_info "Building $tool_name..."
         (cd "$REPO_ROOT/cmd/$tool_name" && go build -o "$tool_name" .)
     done
@@ -171,7 +171,7 @@ require_tool ssh-keygen
 mkdir -p "$WORK_DIR" "$ROOTFS_DIR" "$MEASUREMENTS_DIR"
 
 # Build Go tools.
-for tool_name in eve-predict eve-rootfs-hash; do
+for tool_name in predict rootfs-hash; do
     log_info "Building $tool_name..."
     (cd "$REPO_ROOT/cmd/$tool_name" && go build -o "$tool_name" .)
 done
