@@ -97,7 +97,7 @@ func TestPcrPredictionFull(t *testing.T) {
 		t.Errorf("expected 8 distinct PCR[5] values, got %d: %v", len(allPCRs[5]), vals)
 	}
 
-	if err := SerializePcrsToFile("all_pcrs.gob", allPCRs); err != nil {
+	if err := SerializePcrsToFile("/tmp/all_pcrs.gob", allPCRs); err != nil {
 		t.Errorf("SerializePcrsToFile failed: %v", err)
 	}
 }

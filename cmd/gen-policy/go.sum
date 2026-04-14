@@ -17,6 +17,8 @@ github.com/lf-edge/eve-tpmea v0.1.0 h1:uvRLiGlXeZHntQPAjolaMco6xlYLxGvmqq5n2LUlg
 github.com/lf-edge/eve-tpmea v0.1.0/go.mod h1:jG/tU9AsRvZxUfZSixM6EPO+uXnaZgqBKOjAXJt6zac=
 github.com/lf-edge/eve-tpmea v0.1.1-0.20260410185917-66a5612e9e1b h1:Cr3JKUy2jEw5NKzJjscTdnLD2tQZpPdkI3BtzNshuTw=
 github.com/lf-edge/eve-tpmea v0.1.1-0.20260410185917-66a5612e9e1b/go.mod h1:jG/tU9AsRvZxUfZSixM6EPO+uXnaZgqBKOjAXJt6zac=
+github.com/lf-edge/eve-tpmea v0.1.1-0.20260414082129-2c939de91696 h1:u1+R12MC9wfEejCHr43GrJSNsDd3iHoCJnLtyzNV4dk=
+github.com/lf-edge/eve-tpmea v0.1.1-0.20260414082129-2c939de91696/go.mod h1:jG/tU9AsRvZxUfZSixM6EPO+uXnaZgqBKOjAXJt6zac=
 github.com/mvo5/goconfigparser v0.0.0-20221018104758-434073381f37/go.mod h1:inxjKzuGbpMDmdoI7kogueqBVRdf6fPAG5dAsU3gu60=
 github.com/snapcore/go-gettext v0.0.0-20191107141714-82bbea49e785 h1:PaunR+BhraKSLxt2awQ42zofkP+NKh/VjQ0PjIMk/y4=
 github.com/snapcore/go-gettext v0.0.0-20191107141714-82bbea49e785/go.mod h1:D3SsWAXK7wCCBZu+Vk5hc1EuKj/L3XN1puEMXTU4LrQ=

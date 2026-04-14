@@ -2,7 +2,7 @@ module main
 
 go 1.22
 
-require github.com/lf-edge/eve-tpmea v0.1.1-0.20260410185917-66a5612e9e1b
+require github.com/lf-edge/eve-tpmea v0.1.1-0.20260414082129-2c939de91696
 
 require (
 	github.com/canonical/go-sp800.108-kdf v0.0.0-20210314145419-a3359f2d21b9 // indirect

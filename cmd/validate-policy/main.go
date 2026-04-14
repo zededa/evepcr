@@ -147,7 +147,7 @@ func sealPath(nvIndex, counterIndex uint32, authDigest, secret []byte) {
 	log.Printf("NV index 0x%x not found - sealing", nvIndex)
 
 	if counterIndex != 0 {
-		val, err := tpmea.DefineMonotonicCounter(counterIndex)
+		val, err := tpmea.DefineMonotonicCounter(tpmea.RBP{Counter: counterIndex})
 		if err != nil {
 			log.Fatalf("define counter 0x%x: %v", counterIndex, err)
 		}
@@ -167,7 +167,7 @@ func unsealPath(nvIndex, counterIndex uint32, pub crypto.PublicKey, policies []p
 
 	currentCounter := uint64(0)
 	if counterIndex != 0 {
-		val, err := tpmea.DefineMonotonicCounter(counterIndex)
+		val, err := tpmea.DefineMonotonicCounter(tpmea.RBP{Counter: counterIndex})
 		if err != nil {
 			log.Fatalf("read counter 0x%x: %v", counterIndex, err)
 		}
@@ -212,7 +212,7 @@ func unsealPath(nvIndex, counterIndex uint32, pub crypto.PublicKey, policies []p
 		// longer unseal (rollback protection).
 		if counterIndex != 0 && entry.CounterCheck != 0 && currentCounter < entry.CounterCheck {
 			for currentCounter < entry.CounterCheck {
-				val, err := tpmea.IncreaseMonotonicCounter(counterIndex)
+				val, err := tpmea.IncreaseMonotonicCounter(tpmea.RBP{Counter: counterIndex})
 				if err != nil {
 					log.Fatalf("increment counter 0x%x: %v", counterIndex, err)
 				}
