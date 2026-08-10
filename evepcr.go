@@ -46,6 +46,14 @@ const (
 	eventSeparator        = "EV_SEPARATOR"
 	maxPartitionCount     = 128
 	maxPcrIndex           = 24
+
+	// Firmware measures the partition table into PCR 5, GRUB measures the commands
+	// it runs into PCR 8.
+	gptEventPCR    = 5
+	grubCommandPCR = 8
+	// fileMeasurementPCR is where GRUB records the files it read. Those events
+	// carry a path as their data and the file's contents as their digest.
+	fileMeasurementPCR = 9
 )
 
 // squashfs superblock constants, matching GRUB's grub_squash_digest.
@@ -253,7 +261,7 @@ func getContentDigest(data []byte) [][]byte {
 }
 
 func contentMatchesDigest(ev attest.Event) bool {
-	// the algo information is lost here, so lets try all
+	// the algo is not recorded here; try each
 	digests := getContentDigest(ev.Data)
 	for _, d := range digests {
 		if string(ev.Digest) == string(d) {
@@ -369,11 +377,8 @@ func preValidateEventLog(events []attest.Event, verbose bool) error {
 			return fmt.Errorf("error UEFI debugger present")
 		}
 
-		// This is a sanity check, EV_SEPARATOR is used to draw a line between
-		// the pre-boot environment and entering a post-boot environment.
-		// The data within the event field of the EV_SEPARATOR event MUST be a
-		//32-bit (double-word) of 0’s. We can use this value as a refrence, so we
-		// can actually validate the event data to trust the event type.
+		// EV_SEPARATOR draws a line between the pre-boot and post-boot
+		// environments. Its event data MUST be a 32-bit word of zeros.
 		if et == eventSeparator {
 			// EV_SEPARATOR occurs only once in the flow.
 			if Pcr7SeperatorSeen {
@@ -600,7 +605,7 @@ func ValidateEventLogFromFile(eventLogFile string) error {
 // contains the EFI partition table signature in the event log.
 func findGPTEventIndex(el *attest.EventLog) (int, error) {
 	for i, ev := range el.Events(DefaultAlgo) {
-		if ev.Type.String() == defaultEventString && bytes.Contains(ev.Data, defaultEvent) {
+		if ev.Index == gptEventPCR && ev.Type.String() == defaultEventString && bytes.Contains(ev.Data, defaultEvent) {
 			return i, nil
 		}
 	}
@@ -846,7 +851,7 @@ func extractEvePartitionRefs(el *attest.EventLog, gptIdx int) (imga, imgb *evePa
 // GRUB command strings that contain the active partition reference.
 func detectBaselinePartition(el *attest.EventLog) string {
 	for _, ev := range el.Events(DefaultAlgo) {
-		if ev.Type.String() == "EV_IPL" {
+		if ev.Index == grubCommandPCR && ev.Type.String() == "EV_IPL" {
 			if bytes.Contains(ev.Data, []byte("hd0,gpt2")) {
 				return "gpt2"
 			}
@@ -861,41 +866,85 @@ func detectBaselinePartition(el *attest.EventLog) string {
 // detectEVEVersion finds the EVE version string embedded in GRUB EV_IPL events
 // (e.g. "16.11.0").
 func detectEVEVersion(el *attest.EventLog) string {
-	const prefix = "grub_cmd setparams Boot "
+	prefixes := []string{"grub_cmd: setparams Boot ", "grub_cmd setparams Boot "}
 	for _, ev := range el.Events(DefaultAlgo) {
-		if ev.Type.String() != "EV_IPL" {
+		if ev.Index != grubCommandPCR || ev.Type.String() != "EV_IPL" {
 			continue
 		}
-		s := string(ev.Data)
-		if !strings.HasPrefix(s, prefix) {
-			continue
-		}
-		// Data: "grub_cmd setparams Boot <version>\0"
-		version := s[len(prefix):]
-		version = strings.TrimRight(version, "\x00")
-		if version != "" {
-			return version
+		for _, prefix := range prefixes {
+			if !bytes.HasPrefix(ev.Data, []byte(prefix)) {
+				continue
+			}
+			version := ev.Data[len(prefix):]
+			if i := bytes.IndexByte(version, 0); i >= 0 {
+				version = version[:i]
+			}
+			return string(bytes.TrimSpace(version))
 		}
 	}
 	return ""
 }
 
-// grubEVIPLDigestData returns the slice of eventData that GRUB actually extends
-// the PCR with.
-func grubEVIPLDigestData(data []byte) []byte {
-	const grubCmdPrefix = "grub_cmd "
-	const grubKernelCmdlinePrefix = "grub_kernel_cmdline "
-	switch {
-	case bytes.HasPrefix(data, []byte(grubCmdPrefix)):
-		return data[len(grubCmdPrefix):]
-	case bytes.HasPrefix(data, []byte(grubKernelCmdlinePrefix)):
-		payload := data[len(grubKernelCmdlinePrefix):]
-		if len(payload) > 0 && payload[len(payload)-1] == 0 {
-			payload = payload[:len(payload)-1]
-		}
-		return payload
+// rewriteEVIPL replaces an EV_IPL event's data, keeping its digest correct, and
+// reports whether it could.
+//
+// Three kinds of EV_IPL event turn up, and they need different treatment:
+//
+//   - a command GRUB ran, whose digest is a hash of the command. Rewriting the
+//     data means recomputing the digest.
+//   - a file GRUB read, in PCR 9, whose data is the path and whose digest is the
+//     file's contents. Rewriting the path leaves the digest alone.
+//   - anything else, which is a tag this code does not know. Its digest cannot be
+//     recomputed, so the event is left as it was and false is returned.
+func rewriteEVIPL(clone *attest.EventLog, i int, ev attest.Event, newData []byte) bool {
+	if digestData, ok := grubEVIPLDigestData(newData); ok {
+		return clone.SetEventData(i, newData, recomputeDigests(digestData, clone.Algs)) == nil
 	}
-	return data
+	if ev.Index == fileMeasurementPCR {
+		_, digests, err := clone.GetEventData(i)
+		if err != nil {
+			return false
+		}
+		return clone.SetEventData(i, newData, digests) == nil
+	}
+	return false
+}
+
+// grubEVIPLDigestData returns the bytes GRUB hashes for an EV_IPL event, and
+// whether the digest can be derived from the event data at all.
+//
+// GRUB hashes the command it ran, without the tag the log prefixes it with.
+// Older builds tag it "grub_cmd " and hash the terminating NUL along with the
+// command; newer ones tag it "grub_cmd: " and leave the NUL out.
+//
+// Events that record a file GRUB read carry the file's path as their data but hash
+// its contents, so their digests cannot be recomputed from the event.
+func grubEVIPLDigestData(data []byte) ([]byte, bool) {
+	const (
+		grubCmdPrefix           = "grub_cmd "
+		grubCmdColonPrefix      = "grub_cmd: "
+		grubKernelCmdlinePrefix = "grub_kernel_cmdline "
+		kernelCmdlinePrefix     = "kernel_cmdline: "
+	)
+	switch {
+	case bytes.HasPrefix(data, []byte(grubCmdColonPrefix)):
+		return trimTrailingNUL(data[len(grubCmdColonPrefix):]), true
+	case bytes.HasPrefix(data, []byte(grubCmdPrefix)):
+		return data[len(grubCmdPrefix):], true
+	case bytes.HasPrefix(data, []byte(grubKernelCmdlinePrefix)):
+		return trimTrailingNUL(data[len(grubKernelCmdlinePrefix):]), true
+	case bytes.HasPrefix(data, []byte(kernelCmdlinePrefix)):
+		return trimTrailingNUL(data[len(kernelCmdlinePrefix):]), true
+	}
+	return nil, false
+}
+
+// trimTrailingNUL drops one terminating NUL byte if present.
+func trimTrailingNUL(b []byte) []byte {
+	if len(b) > 0 && b[len(b)-1] == 0 {
+		return b[:len(b)-1]
+	}
+	return b
 }
 
 // cloneWithVersion returns a clone of el where EV_IPL event data that
@@ -911,7 +960,9 @@ func cloneWithVersion(el *attest.EventLog, srcVersion, dstVersion string) *attes
 			continue
 		}
 		newData := bytes.ReplaceAll(ev.Data, srcBytes, dstBytes)
-		_ = clone.SetEventData(i, newData, recomputeDigests(grubEVIPLDigestData(newData)))
+		if !rewriteEVIPL(clone, i, ev, newData) {
+			continue
+		}
 	}
 	return clone
 }
@@ -959,8 +1010,9 @@ func cloneWithAltPartition(el *attest.EventLog, gptIdx int) (*attest.EventLog, e
 			if hasUUID {
 				newData = bytes.ReplaceAll(newData, srcUUIDBytes, dstUUIDBytes)
 			}
-			digestData := grubEVIPLDigestData(newData)
-			_ = clone.SetEventData(i, newData, recomputeDigests(digestData))
+			if !rewriteEVIPL(clone, i, ev, newData) {
+				continue
+			}
 
 		case "EV_EFI_BOOT_SERVICES_APPLICATION":
 			if !bytes.Contains(ev.Data, hardDriveNodeHeader) {
@@ -978,7 +1030,9 @@ func cloneWithAltPartition(el *attest.EventLog, gptIdx int) (*attest.EventLog, e
 				}
 			}
 			if patched {
-				_ = clone.SetEventData(i, newData, recomputeDigests(newData))
+				if _, digests, err := clone.GetEventData(i); err == nil {
+					_ = clone.SetEventData(i, newData, digests)
+				}
 			}
 		}
 	}
@@ -1293,15 +1347,16 @@ func findMeasurefsEventIndex(el *attest.EventLog) (int, error) {
 }
 
 // recomputeDigests hashes data with all supported TPM algorithms.
-func recomputeDigests(data []byte) []attest.Digest {
+func recomputeDigests(data []byte, algs []attest.HashAlg) []attest.Digest {
 	var out []attest.Digest
-	for _, alg := range []crypto.Hash{crypto.SHA1, crypto.SHA256, crypto.SHA384, crypto.SHA512} {
-		if !alg.Available() {
+	for _, alg := range algs {
+		h, err := alg.CryptoHash()
+		if err != nil {
 			continue
 		}
-		h := alg.New()
-		h.Write(data)
-		out = append(out, attest.NewDigest(alg, h.Sum(nil)))
+		hasher := h.New()
+		hasher.Write(data)
+		out = append(out, attest.NewDigest(h, hasher.Sum(nil)))
 	}
 	return out
 }

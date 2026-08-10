@@ -292,6 +292,53 @@ func (e *EventLog) OverrideEvents(index int, el *EventLog) error {
 	return nil
 }
 
+// SpliceEvents keeps this log's events up to srcIndex and appends el's events
+// from dstIndex onward. Unlike OverrideEvents, the two indices are located
+// independently, so the logs need not agree event-for-event up to the splice.
+func (e *EventLog) SpliceEvents(srcIndex int, el *EventLog, dstIndex int) error {
+	if srcIndex < 0 || srcIndex > len(e.rawEvents) {
+		return fmt.Errorf("src index %d out of bounds (%d events)", srcIndex, len(e.rawEvents))
+	}
+	if dstIndex < 0 || dstIndex > len(el.rawEvents) {
+		return fmt.Errorf("dst index %d out of bounds (%d events)", dstIndex, len(el.rawEvents))
+	}
+
+	// Both halves must agree on the digest algorithms.
+	if len(e.Algs) != len(el.Algs) {
+		return fmt.Errorf("logs declare %d and %d digest algorithms", len(e.Algs), len(el.Algs))
+	}
+	for i := range e.Algs {
+		if e.Algs[i] != el.Algs[i] {
+			return fmt.Errorf("logs declare different digest algorithms")
+		}
+	}
+
+	spliced := make([]rawEvent, 0, srcIndex+len(el.rawEvents)-dstIndex)
+	spliced = append(spliced, e.rawEvents[:srcIndex]...)
+	for _, ev := range el.rawEvents[dstIndex:] {
+		// Deep copy so variants built from the same source log do not share slices.
+		spliced = append(spliced, ev.deepCopy())
+	}
+
+	// Renumber sequence so the merged log is one run, not two interleaved.
+	for i := range spliced {
+		spliced[i].sequence = i
+	}
+	e.rawEvents = spliced
+	return nil
+}
+
+// deepCopy returns a rawEvent that shares nothing with the original.
+func (e rawEvent) deepCopy() rawEvent {
+	out := e
+	out.data = append([]byte(nil), e.data...)
+	out.digests = make([]Digest, len(e.digests))
+	for i, d := range e.digests {
+		out.digests[i] = Digest{hash: d.hash, data: append([]byte(nil), d.data...)}
+	}
+	return out
+}
+
 func (e *EventLog) SetEventData(index int, data []byte, di []Digest) error {
 	if index < 0 || index >= len(e.rawEvents) {
 		return fmt.Errorf("index %d out of bounds", index)

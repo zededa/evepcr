@@ -36,6 +36,9 @@ var (
 	HashSHA512 = HashAlg(0x0D) // TPM_ALG_SHA512
 )
 
+// CryptoHash returns the hash this algorithm identifier stands for.
+func (a HashAlg) CryptoHash() (crypto.Hash, error) { return a.cryptoHash() }
+
 func (a HashAlg) cryptoHash() (crypto.Hash, error) {
 	switch a {
 	case HashSHA1:
