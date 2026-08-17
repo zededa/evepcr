@@ -479,7 +479,7 @@ func GetAttestedPCRs(file string) ([]attest.PCR, error) {
 	for hashAlgo, indexes := range ymlPcrs {
 		for index, value := range indexes {
 			// remove 0x prefix
-			if strings.ToLower(value[:2]) == "0x" {
+			if strings.HasPrefix(strings.ToLower(value), "0x") {
 				value = value[2:]
 			}
 			// convert hex string to byte array
@@ -766,6 +766,18 @@ func PredictPCRs(srcLog, dstLog []byte, rootfsHash []byte) (map[int][][]byte, []
 	gptIdx, err := findGPTEventIndex(src)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	// The merge keeps src's events up to gptIdx and takes dst's from gptIdx on, so
+	// dst's GPT event must sit at the same index. It does when both logs come from
+	// the same firmware; a mismatch means the pre-GPT events differ and merging at
+	// one index would splice unrelated events.
+	dstGPTIdx, err := findGPTEventIndex(dst)
+	if err != nil {
+		return nil, nil, err
+	}
+	if dstGPTIdx != gptIdx {
+		return nil, nil, fmt.Errorf("src and dst event logs place the GPT event at different indices (%d vs %d)", gptIdx, dstGPTIdx)
 	}
 
 	dstGPTData, _, err := dst.GetEventData(gptIdx)
@@ -1310,7 +1322,7 @@ func DeserializePcrsFromFile(filename string) (map[int][][]byte, error) {
 //
 // The returned hash should be passed to PredictPCRs as rootfsHash.
 func HashRootfsImage(imageBytes []byte) ([]byte, error) {
-	if len(imageBytes) < squashfsTotalSizeOffset+4 {
+	if len(imageBytes) < squashfsTotalSizeOffset+8 {
 		return nil, fmt.Errorf("image too small for squashfs superblock (%d bytes)", len(imageBytes))
 	}
 
@@ -1319,7 +1331,7 @@ func HashRootfsImage(imageBytes []byte) ([]byte, error) {
 		return nil, fmt.Errorf("not a squashfs image: magic 0x%08x (expected 0x%08x)", magic, squashfsMagic)
 	}
 
-	totalSize := uint64(binary.LittleEndian.Uint32(imageBytes[squashfsTotalSizeOffset : squashfsTotalSizeOffset+4]))
+	totalSize := binary.LittleEndian.Uint64(imageBytes[squashfsTotalSizeOffset : squashfsTotalSizeOffset+8])
 	if totalSize == 0 {
 		return nil, fmt.Errorf("squashfs total_size is zero")
 	}

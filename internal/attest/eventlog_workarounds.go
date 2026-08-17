@@ -26,6 +26,9 @@ type elWorkaround struct {
 
 // inject appends one or more new events into the event log.
 func inject(e *EventLog, pcr int, items ...string) error {
+	if len(e.rawEvents) == 0 {
+		return fmt.Errorf("cannot inject into an empty event log")
+	}
 	for _, data := range items {
 		evt := rawEvent{
 			data:     []byte(data),

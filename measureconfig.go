@@ -104,6 +104,9 @@ func replayMeasureConfig(log []byte, installOriginBasename string) ([]byte, erro
 
 		digest := ev.digest
 		if installOriginBasename != "" && bytes.HasPrefix(ev.data, []byte(configOriginPrefix)) {
+			if overrode {
+				return nil, fmt.Errorf("measure-config event log has more than one /config origin event")
+			}
 			rebuilt, err := rebuildOriginEvent(ev.data, installOriginBasename)
 			if err != nil {
 				return nil, err

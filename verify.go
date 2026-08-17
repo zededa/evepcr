@@ -103,6 +103,9 @@ func failed(mismatch int, format string, args ...any) *Verdict {
 //
 // The caller must have verified the quote's signature against the device's key.
 func VerifyBaselineCandidate(quote *attest.ZAttestQuote, expectedNonce []byte, sel PCRSelection) (*Verdict, error) {
+	if len(sel.Compared) == 0 {
+		return nil, fmt.Errorf("PCR selection has no Compared PCRs")
+	}
 	quoted, err := SignedPCRsFromQuote(quote.GetAttestData(), quote.GetPcrValues(), expectedNonce)
 	if err != nil {
 		return failed(-1, "%s", err), nil
@@ -151,6 +154,8 @@ func VerifyUpdatedBoot(baselineLog, referenceLog, rootfsHash, referenceMeasureCo
 	}
 
 	switch {
+	case len(sel.Compared) == 0:
+		return nil, fmt.Errorf("PCR selection has no Compared PCRs")
 	case len(baselineLog) == 0:
 		return nil, fmt.Errorf("no baseline event log")
 	case len(referenceLog) == 0:
@@ -298,22 +303,18 @@ func summarise(data []byte) string {
 	return string(out)
 }
 
-// isResetPCRValue reports whether a value is what an untouched PCR holds. A SHA-256
-// PCR resets to zero; unimplemented ones are sometimes left all-ones.
+// isResetPCRValue reports whether a value is what an untouched boot PCR holds. A
+// SHA-256 boot PCR resets to zero.
 func isResetPCRValue(v []byte) bool {
 	if len(v) == 0 {
 		return true
 	}
-	zero, ones := true, true
 	for _, b := range v {
 		if b != 0x00 {
-			zero = false
-		}
-		if b != 0xff {
-			ones = false
+			return false
 		}
 	}
-	return zero || ones
+	return true
 }
 
 // DecompressEventLog accepts an event log gzipped or not, which is how devices send

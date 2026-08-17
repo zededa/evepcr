@@ -663,6 +663,11 @@ type specIDEventHeader struct {
 	NumAlgs       uint32
 }
 
+// maxDigestAlgs caps the digest algorithms a spec ID event may declare. The TCG
+// registry defines a handful; this bounds per-event digest count, which is capped
+// at the number of declared algorithms.
+const maxDigestAlgs = 16
+
 // parseSpecIDEvent parses a TCG_EfiSpecIDEventStruct structure from the reader.
 //
 // https://trustedcomputinggroup.org/wp-content/uploads/EFI-Protocol-Specification-rev13-160330final.pdf#page=18
@@ -671,6 +676,9 @@ func parseSpecIDEvent(b []byte) (*specIDEvent, error) {
 	var header specIDEventHeader
 	if err := binary.Read(r, binary.LittleEndian, &header); err != nil {
 		return nil, fmt.Errorf("reading event header: %w: %X", err, b)
+	}
+	if header.NumAlgs == 0 || header.NumAlgs > maxDigestAlgs {
+		return nil, fmt.Errorf("spec id event declares %d digest algorithms", header.NumAlgs)
 	}
 	if header.Signature != wantSignature {
 		return nil, fmt.Errorf("invalid spec id signature: %x", header.Signature)
@@ -796,6 +804,10 @@ func parseRawEvent2(r *bytes.Buffer, specID *specIDEvent) (event rawEvent, err e
 	var numDigests uint32
 	if err := binary.Read(r, binary.LittleEndian, &numDigests); err != nil {
 		return event, err
+	}
+	// A crypto-agile event carries at most one digest per declared algorithm.
+	if int(numDigests) > len(specID.algs) {
+		return event, fmt.Errorf("event declares %d digests, more than the %d algorithms in the log header", numDigests, len(specID.algs))
 	}
 
 	for i := 0; i < int(numDigests); i++ {
