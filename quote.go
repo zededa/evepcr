@@ -13,7 +13,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 
-	"github.com/google/go-tpm/tpm2"
+	"github.com/google/go-tpm/legacy/tpm2"
 	"github.com/lf-edge/eve-api/go/attest"
 )
 
